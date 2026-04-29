@@ -1,0 +1,23 @@
+databases:
+  - name: escala-laboral-db
+    databaseName: escala_laboral
+    user: escala_laboral
+    plan: free
+
+services:
+  - type: web
+    name: escala-laboral
+    runtime: node
+    plan: free
+    buildCommand: |
+      npm install
+      npm --prefix server install
+      npm run build:client
+      npm --prefix server run prisma:generate:postgres
+      npm --prefix server run prisma:push:postgres
+    startCommand: npm --prefix server run start
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: escala-laboral-db
+          property: connectionString
