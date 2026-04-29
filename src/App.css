@@ -1724,6 +1724,10 @@ select:focus,
   }
 
   .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    height: auto;
     gap: 24px;
     border-right: 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -1763,7 +1767,7 @@ select:focus,
   }
 
   .content {
-    padding-top: 84px;
+    padding-top: 24px;
   }
 
   .list-row {
@@ -1811,6 +1815,325 @@ select:focus,
 
   .print-option-row {
     justify-content: space-between;
+  }
+}
+
+@media (max-width: 760px) {
+  .auth-shell {
+    padding: 18px;
+  }
+
+  .auth-card,
+  .section-card,
+  .modal-card,
+  .hero-panel,
+  .scale-week-card,
+  .metric-card,
+  .highlight-card {
+    padding: 18px;
+    border-radius: 20px;
+  }
+
+  .sidebar {
+    padding: 14px 14px 12px;
+  }
+
+  .sidebar-inner {
+    gap: 14px;
+  }
+
+  .sidebar-nav {
+    display: flex;
+    gap: 8px;
+    margin: 0;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+  }
+
+  .nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: max-content;
+    padding: 10px 14px;
+    border-radius: 999px;
+  }
+
+  .sidebar-logout {
+    margin-top: 0;
+  }
+
+  .content {
+    padding: 14px;
+  }
+
+  .hero-panel {
+    align-items: stretch;
+    gap: 16px;
+  }
+
+  .hero-details,
+  .hero-meta,
+  .selector-row,
+  .selector-header,
+  .selector-actions,
+  .section-actions,
+  .section-header,
+  .field-heading,
+  .scale-week-header,
+  .scale-comment-entry-top,
+  .scale-comment-edit-actions,
+  .user-row-header,
+  .user-meta-line,
+  .row-actions,
+  .password-row,
+  .report-actions,
+  .report-sector-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .selector-main,
+  .selector-row {
+    min-width: 0;
+  }
+
+  .selector-row .secondary-button,
+  .selector-row .warning-button,
+  .selector-row .danger-button,
+  .selector-row .ghost-button,
+  .row-actions .secondary-button,
+  .row-actions .warning-button,
+  .row-actions .danger-button,
+  .row-actions .ghost-button,
+  .report-actions .secondary-button,
+  .report-actions .primary-button,
+  .scale-toolbar-actions .secondary-button,
+  .scale-toolbar-actions .ghost-button,
+  .scale-week-actions .secondary-button,
+  .form-actions .primary-button,
+  .form-actions .secondary-button {
+    width: 100%;
+  }
+
+  .report-filter-actions,
+  .report-sector-row .report-filter-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .report-table {
+    min-width: 680px;
+  }
+
+  .form-grid,
+  .rules-grid,
+  .report-summary-grid,
+  .panel-grid,
+  .panel-chart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .inline-create,
+  .password-input-row,
+  .time-control {
+    grid-template-columns: 1fr;
+  }
+
+  .live-metric {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .list-row {
+    padding: 16px;
+  }
+
+  .schedule-summary-header,
+  .scale-comment-actions,
+  .print-option,
+  .scale-day-entry-row {
+    flex-wrap: wrap;
+  }
+
+  .scale-toolbar {
+    gap: 12px;
+  }
+
+  .scale-toolbar-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .notification-button {
+    min-width: 48px;
+  }
+
+  .scale-grid-wrap {
+    margin-inline: -6px;
+    max-height: calc(100vh - 220px);
+  }
+
+  .scale-grid {
+    min-width: 1120px;
+  }
+
+  .scale-grid th,
+  .scale-grid td {
+    padding: 8px 6px;
+  }
+
+  .scale-grid th:first-child,
+  .scale-grid td:first-child,
+  .scale-sticky-cell {
+    min-width: 250px;
+  }
+
+  .scale-sticky-cell,
+  .scale-grid th {
+    position: static;
+    left: auto;
+    box-shadow: none;
+  }
+
+  .scale-person-header {
+    align-items: flex-start;
+  }
+
+  .scale-print-name {
+    font-size: 0.9rem;
+    line-height: 1.2;
+  }
+
+  .scale-day-cell {
+    gap: 6px;
+  }
+
+  .scale-day-entry-row {
+    gap: 6px;
+  }
+
+  .scale-time-detail {
+    grid-template-columns: 88px repeat(4, minmax(72px, 1fr)) auto auto;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .scale-day-cell select {
+    min-width: 88px;
+    width: 88px;
+    padding: 10px 12px;
+  }
+
+  .scale-worked-hours,
+  .scale-inline-warning {
+    text-align: left;
+  }
+
+  .scale-comment-modal {
+    width: min(100%, 100%);
+  }
+
+  .modal-backdrop {
+    padding: 12px;
+  }
+
+  .modal-card {
+    max-height: calc(100vh - 24px);
+  }
+}
+
+@media (max-width: 520px) {
+  .auth-eyebrow {
+    font-size: 1.4rem;
+  }
+
+  .sidebar {
+    padding-inline: 10px;
+  }
+
+  .nav-item {
+    padding: 9px 12px;
+    font-size: 0.92rem;
+  }
+
+  .content {
+    padding: 10px;
+  }
+
+  .hero-panel,
+  .section-card,
+  .modal-card,
+  .scale-week-card,
+  .metric-card,
+  .highlight-card {
+    padding: 14px;
+    border-radius: 18px;
+  }
+
+  .metric-card strong {
+    font-size: 1.55rem;
+  }
+
+  .eyebrow {
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+  }
+
+  input,
+  textarea,
+  select {
+    padding: 11px 12px;
+    font-size: 0.95rem;
+  }
+
+  .pill-row,
+  .selector-grid {
+    gap: 8px;
+  }
+
+  .checkbox-card {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .report-table {
+    min-width: 620px;
+  }
+
+  .scale-grid {
+    min-width: 1120px;
+  }
+
+  .scale-grid th:first-child,
+  .scale-grid td:first-child,
+  .scale-sticky-cell {
+    min-width: 250px;
+  }
+
+  .scale-grid th,
+  .scale-grid td {
+    padding: 7px 5px;
+    font-size: 0.78rem;
+  }
+
+  .scale-time-detail small,
+  .scale-time-detail span {
+    white-space: nowrap;
+    overflow-wrap: normal;
+  }
+
+  .scale-extra-bar {
+    gap: 10px;
+  }
+
+  .scale-suggestion-item {
+    padding: 9px 10px;
+  }
+
+  .user-title-group,
+  .scale-comment-entry-header {
+    gap: 6px;
   }
 }
 
