@@ -7,13 +7,13 @@ const scaleEmploymentOrder = ['CLT', 'PJ', 'EXTRA'] as const
 const companyRoles = ['Administrativo', 'Gestor', 'Visualizador'] as const
 const appSections = [
   'Painel',
-  'Empresa',
-  'Convencoes',
+  'Escala',
   'Colaboradores',
   'Funcoes',
   'Horarios',
-  'Escala',
   'Usuarios',
+  'Empresa',
+  'Convencoes',
 ] as const
 
 const brazilianStates = [
@@ -281,6 +281,8 @@ type AppStateSnapshot = {
   scaleExtraRoster: ScaleExtraRosterRecord[]
   users: CompanyUserRecord[]
 }
+
+type CollaboratorModalSource = 'scale' | 'user'
 
 type CollectiveAgreementRecord = {
   id: number
@@ -1449,6 +1451,7 @@ function App() {
   const [isFunctionModalOpen, setIsFunctionModalOpen] = useState(false)
   const [isCompanyModalOpen, setIsCompanyModalOpen] = useState(false)
   const [isCollaboratorModalOpen, setIsCollaboratorModalOpen] = useState(false)
+  const [collaboratorModalSource, setCollaboratorModalSource] = useState<CollaboratorModalSource>('scale')
   const [functionSuggestion, setFunctionSuggestion] = useState('')
   const [userSectorInput, setUserSectorInput] = useState('')
   const [zipCodeFeedback, setZipCodeFeedback] = useState('')
@@ -3762,12 +3765,19 @@ function App() {
           )
         : [nextCollaboratorRecord, ...current],
     )
+    if (collaboratorModalSource === 'user') {
+      setUserForm((current) => ({
+        ...current,
+        linkedCollaboratorId: String(nextCollaboratorId),
+      }))
+    }
     setCollaboratorForm(emptyCollaboratorForm)
     setCollaboratorLookupFeedback(
       currentCompanyCollaborator
         ? 'Cadastro deste colaborador foi atualizado nesta empresa.'
         : 'Colaborador vinculado com sucesso a esta empresa.',
     )
+    setCollaboratorModalSource('scale')
     setIsCollaboratorModalOpen(false)
   }
 
@@ -4303,6 +4313,20 @@ function App() {
       ...current,
       zipCode: formatZipCode(value),
     }))
+  }
+
+  function openCollaboratorModal(source: CollaboratorModalSource) {
+    setCollaboratorModalSource(source)
+    setCollaboratorLookupFeedback('')
+    setCollaboratorForm(
+      source === 'user'
+        ? {
+            ...emptyCollaboratorForm,
+            fullName: userForm.fullName,
+          }
+        : emptyCollaboratorForm,
+    )
+    setIsCollaboratorModalOpen(true)
   }
 
   function buildAppStateSnapshot(): AppStateSnapshot {
@@ -7127,9 +7151,7 @@ function App() {
                                 type="button"
                                 className="secondary-button"
                                 onClick={() => {
-                                  setCollaboratorForm(emptyCollaboratorForm)
-                                  setCollaboratorLookupFeedback('')
-                                  setIsCollaboratorModalOpen(true)
+                                  openCollaboratorModal('scale')
                                 }}
                               >
                                 Cadastro rapido de colaborador
@@ -7261,29 +7283,43 @@ function App() {
               </label>
 
               {userForm.role === 'Visualizador' ? (
-                <label>
-                  Colaborador vinculado
-                  <select
-                    value={userForm.linkedCollaboratorId}
-                    onChange={(event) =>
-                      setUserForm({ ...userForm, linkedCollaboratorId: event.target.value })
-                    }
-                  >
-                    <option value="">Selecione o colaborador</option>
-                    {companyCollaborators
-                      .filter((item) => item.employmentType !== 'EXTRA')
-                      .sort((left, right) => {
-                        const leftName = getCollaboratorProfile(left.cpf)?.fullName ?? left.cpf
-                        const rightName = getCollaboratorProfile(right.cpf)?.fullName ?? right.cpf
-                        return leftName.localeCompare(rightName)
-                      })
-                      .map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {(getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf)} • {getCollaboratorSector(item)}
-                        </option>
-                      ))}
-                  </select>
-                </label>
+                <div className="field-span">
+                  <label>
+                    Colaborador vinculado
+                    <select
+                      value={userForm.linkedCollaboratorId}
+                      onChange={(event) =>
+                        setUserForm({ ...userForm, linkedCollaboratorId: event.target.value })
+                      }
+                    >
+                      <option value="">Selecione o colaborador</option>
+                      {companyCollaborators
+                        .filter((item) => item.employmentType !== 'EXTRA')
+                        .sort((left, right) => {
+                          const leftName = getCollaboratorProfile(left.cpf)?.fullName ?? left.cpf
+                          const rightName = getCollaboratorProfile(right.cpf)?.fullName ?? right.cpf
+                          return leftName.localeCompare(rightName)
+                        })
+                        .map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {(getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf)} • {getCollaboratorSector(item)}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <div className="inline-create">
+                    <div className="field-helper">
+                      Se o colaborador ainda nao existir, crie-o sem sair deste cadastro.
+                    </div>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      onClick={() => openCollaboratorModal('user')}
+                    >
+                      Novo colaborador
+                    </button>
+                  </div>
+                </div>
               ) : null}
 
               <div className="field-span">
@@ -7799,7 +7835,14 @@ function App() {
       )}
 
       {isCollaboratorModalOpen && (
-        <div className="modal-backdrop" role="presentation" onClick={() => setIsCollaboratorModalOpen(false)}>
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onClick={() => {
+            setCollaboratorModalSource('scale')
+            setIsCollaboratorModalOpen(false)
+          }}
+        >
           <section
             className="modal-card"
             role="dialog"
@@ -7812,13 +7855,22 @@ function App() {
                 <p className="eyebrow">Cadastro rapido</p>
                 <h2 id="collaborator-modal-title">Novo colaborador</h2>
               </div>
-              <button type="button" className="ghost-button" onClick={() => setIsCollaboratorModalOpen(false)}>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  setCollaboratorModalSource('scale')
+                  setIsCollaboratorModalOpen(false)
+                }}
+              >
                 Fechar
               </button>
             </div>
 
             <p className="section-note">
-              O cadastro salva na empresa ativa e atualiza a escala imediatamente.
+              {collaboratorModalSource === 'user'
+                ? 'O cadastro salva na empresa ativa e o novo colaborador fica disponivel para vinculo imediato ao usuario visualizador.'
+                : 'O cadastro salva na empresa ativa e atualiza a escala imediatamente.'}
             </p>
 
             <form className="form-grid" onSubmit={handleCollaboratorSubmit}>
