@@ -15,6 +15,8 @@ dist-ssr
 server/.env
 server/prisma/dev.db
 server/prisma/dev.db-journal
+server/prisma/prisma/dev.db
+server/prisma/prisma/dev.db-journal
 
 # Editor directories and files
 .vscode/*
