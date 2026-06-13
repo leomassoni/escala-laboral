@@ -91,7 +91,6 @@ import {
   buildFunctionFormSnapshot,
   buildScheduleFormSnapshot,
   buildUserFormSnapshot,
-  hasUnsavedChangesInCurrentView,
 } from './formStateUtils'
 import {
   updateCompanyCollectiveProfileInCollection,
@@ -1133,6 +1132,7 @@ function App() {
     auditLogs: false,
   })
   const remoteSyncTimeoutRef = useRef<number | null>(null)
+  const pendingDiscardActionRef = useRef<(() => void) | null>(null)
   const [session, setSession] = useState<Session | null>(null)
   const [currentCompanyId, setCurrentCompanyId] = useState<number | null>(null)
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
@@ -1147,6 +1147,7 @@ function App() {
   const [scheduleFeedback, setScheduleFeedback] = useState<ValidationResult | null>(null)
   const [scheduleWarning, setScheduleWarning] = useState<{ title: string; messages: string[] } | null>(null)
   const [userWarning, setUserWarning] = useState<{ title: string; messages: string[] } | null>(null)
+  const [discardWarning, setDiscardWarning] = useState<{ title: string; message: string } | null>(null)
   const [editingFunctionId, setEditingFunctionId] = useState<number | null>(null)
   const [editingScheduleId, setEditingScheduleId] = useState<number | null>(null)
   const [editingUserId, setEditingUserId] = useState<number | null>(null)
@@ -1584,36 +1585,84 @@ function App() {
     setCollaboratorLookupFeedback(resetState.collaboratorLookupFeedback)
   }
 
-  function confirmDiscardChanges() {
-    if (
-      !hasUnsavedChangesInCurrentView({
-        companyForm,
-        companySnapshot: buildCompanyFormSnapshot(currentCompany, emptyCompanyForm),
-        companyAgreementFeedback,
-        functionForm,
-        functionSnapshot: buildFunctionFormSnapshot(editingFunctionId, functions, emptyFunctionForm),
-        collaboratorForm,
-        emptyCollaboratorForm,
-        scheduleForm,
-        scheduleSnapshot: buildScheduleFormSnapshot(editingScheduleId, schedules, emptyScheduleForm),
-        userForm,
-        userSnapshot: buildUserFormSnapshot(
-          editingUserId,
-          users,
-          emptyUserForm,
-          (role, sectionAccess) => normalizeSectionAccess(role as CompanyRole, sectionAccess),
-          getCompanyUserMembershipsForUser,
-        ),
-        agreementForm,
-        agreementSnapshot: buildAgreementFormSnapshot(editingAgreementId, agreements, emptyAgreementForm),
-        scaleCommentDraft,
-        editingScaleCommentDraft,
-      })
-    ) {
-      return true
+  function hasUnsavedChangesInActiveContext() {
+    if (scaleCommentModal) {
+      return !!scaleCommentDraft.trim() || !!editingScaleCommentDraft.trim()
     }
 
-    return window.confirm('Existem alteracoes nao salvas. Deseja descartar esse progresso?')
+    if (isFunctionModalOpen || activeSection === 'Funcoes') {
+      return (
+        JSON.stringify(functionForm) !== JSON.stringify(buildFunctionFormSnapshot(editingFunctionId, functions, emptyFunctionForm))
+      )
+    }
+
+    if (isCollaboratorModalOpen || activeSection === 'Colaboradores') {
+      return (
+        JSON.stringify(collaboratorForm) !== JSON.stringify(emptyCollaboratorForm) ||
+        !!collaboratorLookupFeedback
+      )
+    }
+
+    if (activeSection === 'Horarios') {
+      return (
+        JSON.stringify(scheduleForm) !== JSON.stringify(buildScheduleFormSnapshot(editingScheduleId, schedules, emptyScheduleForm))
+      )
+    }
+
+    if (activeSection === 'Usuarios') {
+      return (
+        JSON.stringify(userForm) !==
+        JSON.stringify(
+          buildUserFormSnapshot(
+            editingUserId,
+            users,
+            emptyUserForm,
+            (role, sectionAccess) => normalizeSectionAccess(role as CompanyRole, sectionAccess),
+            getCompanyUserMembershipsForUser,
+          ),
+        )
+      )
+    }
+
+    if (activeSection === 'Convencoes') {
+      return (
+        JSON.stringify(agreementForm) !== JSON.stringify(buildAgreementFormSnapshot(editingAgreementId, agreements, emptyAgreementForm))
+      )
+    }
+
+    if (isCompanyModalOpen || activeSection === 'Empresa') {
+      return (
+        JSON.stringify(companyForm) !== JSON.stringify(buildCompanyFormSnapshot(currentCompany, emptyCompanyForm)) ||
+        !!companyAgreementFeedback
+      )
+    }
+
+    return false
+  }
+
+  function runWithDiscardGuard(action: () => void) {
+    if (!hasUnsavedChangesInActiveContext()) {
+      action()
+      return
+    }
+
+    pendingDiscardActionRef.current = action
+    setDiscardWarning({
+      title: 'Descartar alteracoes',
+      message: 'Existem alteracoes nao salvas neste painel. Deseja descartá-las e continuar?',
+    })
+  }
+
+  function cancelDiscardWarning() {
+    pendingDiscardActionRef.current = null
+    setDiscardWarning(null)
+  }
+
+  function confirmDiscardWarning() {
+    const nextAction = pendingDiscardActionRef.current
+    pendingDiscardActionRef.current = null
+    setDiscardWarning(null)
+    nextAction?.()
   }
 
   function handleSectionSelection(section: ActiveSection) {
@@ -1621,16 +1670,14 @@ function App() {
       return
     }
 
-    if (!confirmDiscardChanges()) {
-      return
-    }
+    runWithDiscardGuard(() => {
+      if (section !== 'PainelMaster') {
+        resetForms()
+        closeScaleCommentModal(true)
+      }
 
-    if (section !== 'PainelMaster') {
-      resetForms()
-      closeScaleCommentModal(true)
-    }
-
-    setActiveSection(section)
+      setActiveSection(section)
+    })
   }
 
   function toggleReportColumnVisibility(columnKey: string) {
@@ -1792,7 +1839,8 @@ function App() {
   }
 
   function closeScaleCommentModal(force = false) {
-    if (!force && !confirmDiscardChanges()) {
+    if (!force) {
+      runWithDiscardGuard(() => closeScaleCommentModal(true))
       return
     }
 
@@ -3168,54 +3216,52 @@ function App() {
   }
 
   function switchCompany(companyId: number) {
-    if (!confirmDiscardChanges()) {
-      return
-    }
-
-    const targetCompany = findCompanyById(companies, companyId)
-    if (!targetCompany) {
-      return
-    }
-
-    if (session?.kind === 'companyUser') {
-      const targetMembership = session.memberships.find((item) => item.companyId === companyId)
-      if (!targetMembership) {
+    runWithDiscardGuard(() => {
+      const targetCompany = findCompanyById(companies, companyId)
+      if (!targetCompany) {
         return
       }
 
-      if (targetCompany.status === 'INATIVA') {
-        setLoginError('A empresa selecionada esta inativa.')
-        return
+      if (session?.kind === 'companyUser') {
+        const targetMembership = session.memberships.find((item) => item.companyId === companyId)
+        if (!targetMembership) {
+          return
+        }
+
+        if (targetCompany.status === 'INATIVA') {
+          setLoginError('A empresa selecionada esta inativa.')
+          return
+        }
+
+        if (targetMembership.id !== session.user.id) {
+          setSession({
+            kind: 'companyUser',
+            user: targetMembership,
+            memberships: session.memberships,
+          })
+        }
       }
 
-      if (targetMembership.id !== session.user.id) {
-        setSession({
-          kind: 'companyUser',
-          user: targetMembership,
-          memberships: session.memberships,
+      setCurrentCompanyId(companyId)
+      populateCompanyForm(targetCompany)
+      resetForms()
+      setActiveSection('Painel')
+      setLoginError('')
+      if (session) {
+        appendAuditLog({
+          companyId,
+          actorName: session.user.fullName,
+          actorRole: session.kind === 'systemAdmin' ? 'Master' : session.user.role,
+          module: 'Sessao',
+          action: 'Troca de empresa',
+          targetType: 'Empresa',
+          targetLabel: targetCompany.tradeName,
+          severity: 'info',
+          impactSummary: `Empresa ativa alterada para ${targetCompany.tradeName}.`,
+          relatedCompanyIds: [companyId],
         })
       }
-    }
-
-    setCurrentCompanyId(companyId)
-    populateCompanyForm(targetCompany)
-    resetForms()
-    setActiveSection('Painel')
-    setLoginError('')
-    if (session) {
-      appendAuditLog({
-        companyId,
-        actorName: session.user.fullName,
-        actorRole: session.kind === 'systemAdmin' ? 'Master' : session.user.role,
-        module: 'Sessao',
-        action: 'Troca de empresa',
-        targetType: 'Empresa',
-        targetLabel: targetCompany.tradeName,
-        severity: 'info',
-        impactSummary: `Empresa ativa alterada para ${targetCompany.tradeName}.`,
-        relatedCompanyIds: [companyId],
-      })
-    }
+    })
   }
 
   function handleLogin(event: FormEvent<HTMLFormElement>) {
@@ -3297,44 +3343,40 @@ function App() {
   }
 
   function logout() {
-    if (!confirmDiscardChanges()) {
-      return
-    }
-
-    if (session) {
-      appendAuditLog({
-        companyId: currentCompanyId,
-        actorName: session.user.fullName,
-        actorRole: session.kind === 'systemAdmin' ? 'Master' : session.user.role,
-        module: 'Sessao',
-        action: 'Logout',
-        targetType: 'Sessao',
-        targetLabel: session.user.fullName,
-        severity: 'info',
-        impactSummary: 'Sessao encerrada manualmente.',
-        relatedCompanyIds: currentCompanyId === null ? [] : [currentCompanyId],
-      })
-    }
-    setSession(null)
-    setCurrentCompanyId(null)
-    setLoginForm({ username: '', password: '' })
-    setLoginError('')
-    setIsCompanyModalOpen(false)
+    runWithDiscardGuard(() => {
+      if (session) {
+        appendAuditLog({
+          companyId: currentCompanyId,
+          actorName: session.user.fullName,
+          actorRole: session.kind === 'systemAdmin' ? 'Master' : session.user.role,
+          module: 'Sessao',
+          action: 'Logout',
+          targetType: 'Sessao',
+          targetLabel: session.user.fullName,
+          severity: 'info',
+          impactSummary: 'Sessao encerrada manualmente.',
+          relatedCompanyIds: currentCompanyId === null ? [] : [currentCompanyId],
+        })
+      }
+      setSession(null)
+      setCurrentCompanyId(null)
+      setLoginForm({ username: '', password: '' })
+      setLoginError('')
+      setIsCompanyModalOpen(false)
+    })
   }
 
   function startAgreementFromCompanyContext() {
-    if (!confirmDiscardChanges()) {
-      return
-    }
-
-    setAgreementForm((current) => ({
-      ...current,
-      coveredState: companyForm.state,
-      coveredCity: companyForm.city,
-    }))
-    setEditingAgreementId(null)
-    setActiveSection('Convencoes')
-    setIsCompanyModalOpen(false)
+    runWithDiscardGuard(() => {
+      setAgreementForm((current) => ({
+        ...current,
+        coveredState: companyForm.state,
+        coveredCity: companyForm.city,
+      }))
+      setEditingAgreementId(null)
+      setActiveSection('Convencoes')
+      setIsCompanyModalOpen(false)
+    })
   }
 
   function submitCompany(event: FormEvent<HTMLFormElement>, mode: 'create' | 'update') {
@@ -4363,7 +4405,8 @@ function App() {
   }
 
   function closeFunctionModal(force = false) {
-    if (!force && !confirmDiscardChanges()) {
+    if (!force) {
+      runWithDiscardGuard(() => closeFunctionModal(true))
       return
     }
 
@@ -4375,7 +4418,8 @@ function App() {
   }
 
   function closeCompanyModal(force = false) {
-    if (!force && !confirmDiscardChanges()) {
+    if (!force) {
+      runWithDiscardGuard(() => closeCompanyModal(true))
       return
     }
 
@@ -4385,7 +4429,8 @@ function App() {
   }
 
   function closeCollaboratorModal(force = false) {
-    if (!force && !confirmDiscardChanges()) {
+    if (!force) {
+      runWithDiscardGuard(() => closeCollaboratorModal(true))
       return
     }
 
@@ -8248,6 +8293,42 @@ function App() {
                   <li key={message}>{message}</li>
                 ))}
               </ul>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {discardWarning && (
+        <div className="modal-backdrop" role="presentation" onClick={cancelDiscardWarning}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="discard-warning-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Alteracoes nao salvas</p>
+                <h2 id="discard-warning-title">{discardWarning.title}</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={cancelDiscardWarning}>
+                Fechar
+              </button>
+            </div>
+
+            <div className="feedback warning">
+              <strong>O progresso atual sera perdido.</strong>
+              <p>{discardWarning.message}</p>
+            </div>
+
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={cancelDiscardWarning}>
+                Continuar editando
+              </button>
+              <button type="button" className="primary-button" onClick={confirmDiscardWarning}>
+                Descartar e continuar
+              </button>
             </div>
           </section>
         </div>
