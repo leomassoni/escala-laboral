@@ -1,20 +1,141 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
+import {
+  appSections,
+  buildDefaultSectionAccessByRole,
+  companyRoles,
+  masterPanelSections,
+  normalizeSectionAccess,
+} from './accessControl'
+import type { AppSection, CompanyRole, MasterPanelSection, UserSectionAccess } from './accessControl'
+import { reportOptions } from './reportCatalog'
+import type { ReportId } from './reportCatalog'
+import { buildReportPrintHtml, buildReportWorksheetRows } from './reportExportUtils'
+import {
+  buildDeletedScheduleFeedback,
+  buildDuplicateScheduleFeedback,
+  buildInvalidScheduleWarning,
+  buildInvalidUserWarning,
+  buildSuccessfulScheduleFeedback,
+} from './feedbackUtils'
+import {
+  buildCollaboratorModalClosedState,
+  buildCollaboratorModalOpenState,
+  buildCompanyModalClosedState,
+  buildFunctionModalClosedState,
+  buildScaleCommentModalClosedState,
+  buildScaleCommentModalOpenState,
+} from './modalStateUtils'
+import { buildResetFormState } from './resetUtils'
+import {
+  clearReportColumnFilterSelection,
+  resetReportTableFilters,
+  resetReportTableVisibleColumns,
+  showVisibleReportColumn,
+  toggleReportColumnFilterSelection,
+  toggleVisibleReportColumn,
+} from './reportTableStateUtils'
+import {
+  filterReportRows,
+  getReportColumnDistinctValues,
+  getReportPreviewRows,
+  getVisibleReportColumnKeys,
+  splitReportColumnsByVisibility,
+} from './reportViewUtils'
+import {
+  addResolvedSectorToUserForm,
+  ensureCompanySectorInCollection,
+  resolveCompanySectorName,
+  toggleUserSectorSelection,
+} from './sectorUtils'
+import {
+  apiBaseUrl,
+  appStateVersion,
+  readStoredValue,
+  storageKeys,
+  writeStoredValue,
+} from './persistence'
+import type { ModularStateKey } from './persistence'
+import {
+  filterAuditLogs,
+  getAuditAlertLogs,
+  getAuditImpactLogs,
+  getCurrentCompanyAuditLogs,
+  normalizeAuditLogs,
+} from './auditUtils'
+import {
+  escapeHtml,
+  formatCurrency,
+  formatDateTimeLabel,
+  formatMonthDateLabel,
+  formatWorkedHours,
+  getShortDisplayName,
+  parseCurrencyValue,
+  slugifyFilePart,
+} from './formatters'
+import {
+  buildSchedulePreview,
+  formatCnpj,
+  formatCpf,
+  formatZipCode,
+  normalizeAbbreviation,
+  normalizeLocationValue,
+  normalizeSequentialTimes,
+  normalizeTypedTime,
+  parseTime,
+} from './formUtils'
+import {
+  buildAgreementFormSnapshot,
+  buildCompanyFormSnapshot,
+  buildFunctionFormSnapshot,
+  buildScheduleFormSnapshot,
+  buildUserFormSnapshot,
+  hasUnsavedChangesInCurrentView,
+} from './formStateUtils'
+import {
+  updateCompanyCollectiveProfileInCollection,
+  updateCompanyOperationalSettingsInCollection,
+  removeFunctionFromCollaborators,
+} from './companyFunctionUtils'
+import {
+  buildCollaboratorCpfLookupState,
+  buildCollaboratorCpfMissingProfileState,
+  changeCollaboratorEmploymentTypeState,
+  toggleCollaboratorFunctionSelection,
+} from './collaboratorFormUtils'
+import {
+  buildCollaboratorEditState,
+  buildFunctionEditState,
+  buildFunctionModalOpenState,
+  buildScheduleEditState,
+  buildUserEditState,
+} from './formEditUtils'
+import {
+  areMembershipListsEqual,
+  getCompanyUserMembershipsForUser,
+  getCompanyUserMembershipsFromCredentials,
+  getSectorNamesForCompany,
+} from './sessionUtils'
+import {
+  findCompanyById,
+  findSystemAdminByCredentials,
+  getActiveCompanyUserMemberships,
+  resolveCompanyLoginResult,
+} from './sessionFlowUtils'
+import {
+  formatDateLabel,
+  formatDayHeader,
+  formatWeekLabel,
+  getMonthLabel,
+  getMonthWeeks,
+  getWeekDates,
+  startOfWeek,
+  toIsoDate,
+} from './dateUtils'
 
 const collaboratorEmploymentTypes = ['CLT', 'PJ', 'EXTRA'] as const
 const scaleEmploymentOrder = ['CLT', 'PJ', 'EXTRA'] as const
-const companyRoles = ['Administrativo', 'Gestor', 'Visualizador'] as const
-const appSections = [
-  'Painel',
-  'Escala',
-  'Colaboradores',
-  'Funcoes',
-  'Horarios',
-  'Usuarios',
-  'Empresa',
-  'Convencoes',
-] as const
 
 const brazilianStates = [
   'AC',
@@ -46,21 +167,7 @@ const brazilianStates = [
   'TO',
 ] as const
 
-const reportOptions: Array<{ id: ReportId; label: string }> = [
-  { id: 'scale-consolidated', label: 'Escala consolidada' },
-  { id: 'workload-by-collaborator', label: 'Carga horaria por colaborador' },
-  { id: 'scale-irregularities', label: 'Irregularidades da escala' },
-  { id: 'extras', label: 'Relatorio de extras' },
-  { id: 'availability', label: 'Disponibilidade e inativacoes' },
-  { id: 'coverage', label: 'Cobertura por setor e funcao' },
-  { id: 'hour-exposure', label: 'Exposicao de jornada' },
-  { id: 'schedule-usage', label: 'Mapa de horarios utilizados' },
-  { id: 'user-access', label: 'Quadro de usuarios e acessos' },
-]
-
 type CollaboratorEmploymentType = (typeof collaboratorEmploymentTypes)[number]
-type CompanyRole = (typeof companyRoles)[number]
-type AppSection = (typeof appSections)[number]
 type InactivePeriod = {
   from: string
   to: string | null
@@ -82,6 +189,10 @@ type CompanyRecord = {
   district: string
   city: string
   state: string
+  defaultScaleViewMode?: ScaleViewMode
+  defaultReportId?: ReportId
+  defaultPrintIncludeExtras?: boolean
+  allowPastScaleEdits?: boolean
 }
 
 type FunctionRecord = {
@@ -184,21 +295,27 @@ type CompanyUserRecord = {
   password: string
   role: CompanyRole
   sectors: string[]
+  sectionAccess?: Partial<UserSectionAccess>
   linkedCollaboratorId: number | null
   isActive: boolean
 }
 
+type AuditLogRecord = {
+  id: number
+  companyId: number | null
+  actorName: string
+  actorRole: string
+  module: string
+  action: string
+  targetType: string
+  targetLabel: string
+  severity: 'info' | 'warning' | 'critical'
+  impactSummary: string
+  createdAt: string
+  relatedCompanyIds: number[]
+}
+
 type ScaleViewMode = 'week' | 'month'
-type ReportId =
-  | 'scale-consolidated'
-  | 'workload-by-collaborator'
-  | 'scale-irregularities'
-  | 'extras'
-  | 'availability'
-  | 'coverage'
-  | 'hour-exposure'
-  | 'schedule-usage'
-  | 'user-access'
 
 type ReportColumn = {
   key: string
@@ -250,23 +367,6 @@ type ScheduleFormState = {
   endPeriod: 'AM' | 'PM'
 }
 
-const storageKeys = {
-  companies: 'escala-laboral:companies',
-  agreements: 'escala-laboral:agreements',
-  sectors: 'escala-laboral:sectors',
-  functions: 'escala-laboral:functions',
-  collaboratorProfiles: 'escala-laboral:collaborator-profiles',
-  collaborators: 'escala-laboral:collaborators',
-  schedules: 'escala-laboral:schedules',
-  scaleAssignments: 'escala-laboral:scale-assignments',
-  scaleComments: 'escala-laboral:scale-comments',
-  scaleExtraRoster: 'escala-laboral:scale-extra-roster',
-  users: 'escala-laboral:users',
-} as const
-
-const appStateVersion = 1
-const apiBaseUrl = (import.meta.env.VITE_API_URL ?? '/api').replace(/\/$/, '')
-
 type AppStateSnapshot = {
   version: number
   companies: CompanyRecord[]
@@ -280,9 +380,17 @@ type AppStateSnapshot = {
   scaleComments: ScaleCommentThreadRecord[]
   scaleExtraRoster: ScaleExtraRosterRecord[]
   users: CompanyUserRecord[]
+  auditLogs: AuditLogRecord[]
+}
+
+type CompanyUserSession = {
+  kind: 'companyUser'
+  user: CompanyUserRecord
+  memberships: CompanyUserRecord[]
 }
 
 type CollaboratorModalSource = 'scale' | 'user'
+type ActiveSection = AppSection | 'PainelMaster'
 
 type CollectiveAgreementRecord = {
   id: number
@@ -317,10 +425,7 @@ type Session =
       kind: 'systemAdmin'
       user: SystemAdmin
     }
-  | {
-      kind: 'companyUser'
-      user: CompanyUserRecord
-    }
+  | CompanyUserSession
 
 const systemAdmins: SystemAdmin[] = [
   {
@@ -558,7 +663,9 @@ const emptyUserForm = {
   password: '',
   role: 'Gestor' as CompanyRole,
   sectors: [] as string[],
+  sectionAccess: {} as Partial<UserSectionAccess>,
   linkedCollaboratorId: '',
+  additionalCompanyIds: [] as string[],
 }
 
 const emptyAgreementForm = {
@@ -583,109 +690,6 @@ const emptyAgreementForm = {
   bankHoursMaxDailyMinutes: '600',
   rotatingDayOffNoticeDays: '15',
   allowTwelveByThirtySix: true,
-}
-
-function normalizeAbbreviation(value: string) {
-  const compact = value
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^A-Za-z0-9]/g, '')
-    .trim()
-    .toUpperCase()
-
-  if (compact.length >= 3) {
-    return compact.slice(0, 3)
-  }
-
-  return (compact + 'XXX').slice(0, 3)
-}
-
-function formatCnpj(value: string) {
-  const digits = value.replace(/\D/g, '').slice(0, 14)
-
-  return digits
-    .replace(/^(\d{2})(\d)/, '$1.$2')
-    .replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3')
-    .replace(/\.(\d{3})(\d)/, '.$1/$2')
-    .replace(/(\d{4})(\d)/, '$1-$2')
-}
-
-function formatZipCode(value: string) {
-  const digits = value.replace(/\D/g, '').slice(0, 8)
-  return digits.replace(/^(\d{5})(\d)/, '$1-$2')
-}
-
-function formatCpf(value: string) {
-  const digits = value.replace(/\D/g, '').slice(0, 11)
-
-  return digits
-    .replace(/^(\d{3})(\d)/, '$1.$2')
-    .replace(/^(\d{3})\.(\d{3})(\d)/, '$1.$2.$3')
-    .replace(/\.(\d{3})(\d)/, '.$1-$2')
-}
-
-function formatTimeInput(value: string) {
-  const digits = value.replace(/\D/g, '').slice(0, 4)
-  if (digits.length <= 1) {
-    return digits
-  }
-
-  if (digits.length === 2) {
-    return digits
-  }
-
-  if (digits.length === 3) {
-    return `${digits.slice(0, 2)}:${digits.slice(2)}`
-  }
-
-  return `${digits.slice(0, 2)}:${digits.slice(2)}`
-}
-
-function normalizeTypedTime(value: string, currentPeriod: 'AM' | 'PM') {
-  const digits = value.replace(/\D/g, '').slice(0, 4)
-
-  if (digits.length < 4) {
-    return {
-      time: formatTimeInput(digits),
-      period: currentPeriod,
-    }
-  }
-
-  const rawHours = Number(digits.slice(0, 2))
-  const rawMinutes = Number(digits.slice(2))
-
-  if (rawMinutes > 59 || rawHours > 24 || (rawHours === 24 && rawMinutes > 0)) {
-    return {
-      time: formatTimeInput(digits),
-      period: currentPeriod,
-    }
-  }
-
-  if (rawHours <= 12) {
-    return {
-      time: `${digits.slice(0, 2)}:${digits.slice(2)}`,
-      period: 'AM' as const,
-    }
-  }
-
-  const normalizedHour = rawHours === 24 ? 12 : rawHours - 12
-
-  return {
-    time: `${String(normalizedHour).padStart(2, '0')}:${digits.slice(2)}`,
-    period: 'PM' as const,
-  }
-}
-
-function isCompleteTimeInput(value: string) {
-  return /^\d{2}:\d{2}$/.test(value)
-}
-
-function normalizeLocationValue(value: string) {
-  return value
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim()
-    .toLowerCase()
 }
 
 function resolveCollectiveAgreementId(
@@ -782,255 +786,6 @@ function endInactivePeriod(periods: InactivePeriod[], to: string) {
   })
 }
 
-function parseTime(value: string, period: 'AM' | 'PM') {
-  if (!isCompleteTimeInput(value)) {
-    return null
-  }
-
-  const [hours, minutes] = value.split(':').map(Number)
-  if (hours < 0 || hours > 24 || minutes > 59) {
-    return null
-  }
-
-  if (hours === 24 && minutes > 0) {
-    return null
-  }
-
-  if (period === 'AM') {
-    if (hours === 0 && minutes === 0) {
-      return null
-    }
-
-    if (hours > 12) {
-      return null
-    }
-
-    if (hours === 12 && minutes > 0) {
-      return null
-    }
-
-    return hours * 60 + minutes
-  }
-
-  if (hours >= 13 && hours <= 24) {
-    return hours * 60 + minutes
-  }
-
-  if (hours === 0 || hours > 12) {
-    return null
-  }
-
-  if (hours === 12) {
-    if (minutes === 0) {
-      return 24 * 60
-    }
-
-    return hours * 60 + minutes
-  }
-
-  return (hours + 12) * 60 + minutes
-}
-
-function buildSchedulePreview(values: ScheduleFormState) {
-  const issues: string[] = []
-  const labels = [
-    ['startTime', 'Horario de inicio'],
-    ['breakStart', 'Inicio de pausa'],
-    ['breakEnd', 'Fim de pausa'],
-    ['endTime', 'Fim do turno'],
-  ] as const
-
-  labels.forEach(([field, label]) => {
-    if (!isCompleteTimeInput(values[field])) {
-      issues.push(`${label}: digite exatamente 4 numeros no formato 0000.`)
-    }
-  })
-
-  const start = parseTime(values.startTime, values.startPeriod)
-  const breakStart = parseTime(values.breakStart, values.breakStartPeriod)
-  const breakEnd = parseTime(values.breakEnd, values.breakEndPeriod)
-  const end = parseTime(values.endTime, values.endPeriod)
-
-  if (isCompleteTimeInput(values.startTime) && start === null) {
-    issues.push('Horario de inicio invalido para o periodo selecionado.')
-  }
-
-  if (isCompleteTimeInput(values.breakStart) && breakStart === null) {
-    issues.push('Inicio de pausa invalido para o periodo selecionado.')
-  }
-
-  if (isCompleteTimeInput(values.breakEnd) && breakEnd === null) {
-    issues.push('Fim de pausa invalido para o periodo selecionado.')
-  }
-
-  if (isCompleteTimeInput(values.endTime) && end === null) {
-    issues.push('Fim do turno invalido para o periodo selecionado.')
-  }
-
-  if ([start, breakStart, breakEnd, end].some((item) => item === null)) {
-    return { netMinutes: undefined, issues }
-  }
-
-  const safeStart = start as number
-  const safeBreakStart = breakStart as number
-  const safeBreakEnd = breakEnd as number
-  const safeEnd = end as number
-
-  const [normalizedStart, normalizedBreakStart, normalizedBreakEnd, normalizedEnd] =
-    normalizeSequentialTimes([safeStart, safeBreakStart, safeBreakEnd, safeEnd])
-
-  if (
-    !(
-      normalizedStart < normalizedBreakStart &&
-      normalizedBreakStart < normalizedBreakEnd &&
-      normalizedBreakEnd < normalizedEnd
-    )
-  ) {
-    issues.push('A sequencia de inicio, pausa e fim do turno esta invalida.')
-    return { netMinutes: undefined, issues }
-  }
-
-  const netMinutes =
-    normalizedEnd - normalizedStart - (normalizedBreakEnd - normalizedBreakStart)
-
-  if (netMinutes <= 0) {
-    issues.push('A jornada liquida precisa ser maior que zero.')
-    return { netMinutes: undefined, issues }
-  }
-
-  return { netMinutes, issues }
-}
-
-function normalizeSequentialTimes(values: number[]) {
-  const result: number[] = []
-
-  values.forEach((value, index) => {
-    if (index === 0) {
-      result.push(value)
-      return
-    }
-
-    let candidate = value
-    while (candidate <= result[index - 1]) {
-      candidate += 24 * 60
-    }
-    result.push(candidate)
-  })
-
-  return result
-}
-
-function formatWorkedHours(totalMinutes: number) {
-  const hours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
-}
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat('pt-BR', {
-    style: 'currency',
-    currency: 'BRL',
-  }).format(value)
-}
-
-function parseCurrencyValue(value: string) {
-  const normalized = value
-    .replace(/\./g, '')
-    .replace(',', '.')
-    .replace(/[^\d.-]/g, '')
-
-  const parsed = Number(normalized)
-  return Number.isFinite(parsed) ? parsed : 0
-}
-
-function toIsoDate(date: Date) {
-  return date.toISOString().slice(0, 10)
-}
-
-function addDays(baseDate: Date, days: number) {
-  const nextDate = new Date(baseDate)
-  nextDate.setDate(nextDate.getDate() + days)
-  return nextDate
-}
-
-function startOfWeek(dateValue: string | Date) {
-  const sourceDate = typeof dateValue === 'string' ? new Date(`${dateValue}T12:00:00`) : new Date(dateValue)
-  const day = sourceDate.getDay()
-  const mondayOffset = day === 0 ? -6 : 1 - day
-  return addDays(sourceDate, mondayOffset)
-}
-
-function endOfWeek(dateValue: string | Date) {
-  return addDays(startOfWeek(dateValue), 6)
-}
-
-function getWeekDates(dateValue: string | Date) {
-  const weekStart = startOfWeek(dateValue)
-  return Array.from({ length: 7 }, (_, index) => addDays(weekStart, index))
-}
-
-function getMonthWeeks(monthValue: string) {
-  const [year, month] = monthValue.split('-').map(Number)
-  const firstDay = new Date(year, month - 1, 1, 12)
-  const lastDay = new Date(year, month, 0, 12)
-  const cursor = startOfWeek(firstDay)
-  const finalWeekEnd = endOfWeek(lastDay)
-  const weeks: Date[][] = []
-
-  while (cursor <= finalWeekEnd) {
-    weeks.push(getWeekDates(cursor))
-    cursor.setDate(cursor.getDate() + 7)
-  }
-
-  return weeks
-}
-
-function getMonthLabel(monthValue: string) {
-  const [year, month] = monthValue.split('-').map(Number)
-  return new Intl.DateTimeFormat('pt-BR', {
-    month: 'long',
-    year: 'numeric',
-  }).format(new Date(year, month - 1, 1))
-}
-
-function formatWeekLabel(weekDates: Date[]) {
-  const formatter = new Intl.DateTimeFormat('pt-BR', {
-    day: '2-digit',
-    month: '2-digit',
-  })
-
-  return `${formatter.format(weekDates[0])} a ${formatter.format(weekDates[6])}`
-}
-
-function formatDayHeader(date: Date) {
-  return new Intl.DateTimeFormat('pt-BR', {
-    weekday: 'short',
-    day: '2-digit',
-  }).format(date)
-}
-
-function formatDateLabel(dateValue: string) {
-  return new Intl.DateTimeFormat('pt-BR').format(new Date(`${dateValue}T12:00:00`))
-}
-
-function slugifyFilePart(value: string) {
-  return value
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-}
-
-function getShortDisplayName(fullName: string) {
-  const parts = fullName.trim().split(/\s+/).filter(Boolean)
-  if (parts.length <= 1) {
-    return fullName.trim()
-  }
-
-  return `${parts[0]} ${parts[parts.length - 1]}`
-}
-
 function normalizeScaleCommentThreads(
   threads: unknown,
 ) {
@@ -1062,55 +817,8 @@ function normalizeScaleCommentThreads(
   })
 }
 
-function formatDateTimeLabel(dateValue: string) {
-  return new Intl.DateTimeFormat('pt-BR', {
-    dateStyle: 'short',
-    timeStyle: 'short',
-  }).format(new Date(dateValue))
-}
-
-function formatMonthDateLabel(dateValue: string) {
-  return new Intl.DateTimeFormat('pt-BR', {
-    dateStyle: 'short',
-  }).format(new Date(`${dateValue}T12:00:00`))
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
 function computeScheduleNetMinutes(values: ScheduleFormState) {
   return buildSchedulePreview(values).netMinutes
-}
-
-function readStoredValue<T>(key: string, fallback: T) {
-  if (typeof window === 'undefined') {
-    return fallback
-  }
-
-  try {
-    const rawValue = window.localStorage.getItem(key)
-    if (!rawValue) {
-      return fallback
-    }
-
-    return JSON.parse(rawValue) as T
-  } catch {
-    return fallback
-  }
-}
-
-function writeStoredValue<T>(key: string, value: T) {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  window.localStorage.setItem(key, JSON.stringify(value))
 }
 
 function mergeSeedAgreements(storedAgreements: Array<CollectiveAgreementRecord & { isActive?: boolean }>) {
@@ -1137,6 +845,10 @@ function normalizePersistedState(state: AppStateSnapshot) {
     companies: state.companies.map((item) => ({
       ...item,
       suggestedCollectiveAgreementId: item.suggestedCollectiveAgreementId ?? null,
+      defaultScaleViewMode: item.defaultScaleViewMode ?? 'week',
+      defaultReportId: item.defaultReportId ?? 'scale-consolidated',
+      defaultPrintIncludeExtras: item.defaultPrintIncludeExtras ?? false,
+      allowPastScaleEdits: item.allowPastScaleEdits ?? false,
     })),
     agreements: mergeSeedAgreements(state.agreements),
     sectors: state.sectors,
@@ -1161,9 +873,11 @@ function normalizePersistedState(state: AppStateSnapshot) {
     users: state.users.map((item) => ({
       ...item,
       sectors: item.sectors && item.sectors.length > 0 ? item.sectors : [],
+      sectionAccess: normalizeSectionAccess(item.role, item.sectionAccess),
       linkedCollaboratorId: item.linkedCollaboratorId ?? null,
       isActive: item.isActive ?? true,
     })),
+    auditLogs: normalizeAuditLogs(state.auditLogs),
   }
 }
 
@@ -1286,7 +1000,7 @@ function validateSchedule(
 }
 
 function App() {
-  const [activeSection, setActiveSection] = useState<AppSection>('Painel')
+  const [activeSection, setActiveSection] = useState<ActiveSection>('Painel')
   const [companies, setCompanies] = useState<CompanyRecord[]>(() =>
     readStoredValue<Array<CompanyRecord & { suggestedCollectiveAgreementId?: number | null }>>(storageKeys.companies, []).map((item) => ({
       ...item,
@@ -1399,9 +1113,25 @@ function App() {
       isActive: item.isActive ?? true,
     })),
   )
+  const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>(() =>
+    normalizeAuditLogs(readStoredValue<AuditLogRecord[]>(storageKeys.auditLogs, [])),
+  )
   const [persistenceMode, setPersistenceMode] = useState<'pending' | 'local' | 'api'>('pending')
   const [isPersistenceReady, setIsPersistenceReady] = useState(false)
   const skipNextRemoteSyncRef = useRef(false)
+  const skipNextModuleSyncRef = useRef<Record<ModularStateKey, boolean>>({
+    agreements: false,
+    sectors: false,
+    functions: false,
+    collaboratorProfiles: false,
+    collaborators: false,
+    schedules: false,
+    scaleAssignments: false,
+    scaleComments: false,
+    scaleExtraRoster: false,
+    users: false,
+    auditLogs: false,
+  })
   const remoteSyncTimeoutRef = useRef<number | null>(null)
   const [session, setSession] = useState<Session | null>(null)
   const [currentCompanyId, setCurrentCompanyId] = useState<number | null>(null)
@@ -1457,9 +1187,21 @@ function App() {
   const [zipCodeFeedback, setZipCodeFeedback] = useState('')
   const [collaboratorLookupFeedback, setCollaboratorLookupFeedback] = useState('')
   const [companyAgreementFeedback, setCompanyAgreementFeedback] = useState('')
+  const [activeMasterPanelSection, setActiveMasterPanelSection] = useState<MasterPanelSection>('Auditoria')
+  const [masterPanelSearch, setMasterPanelSearch] = useState('')
+  const [masterPanelSeverityFilter, setMasterPanelSeverityFilter] =
+    useState<'Todas' | 'info' | 'warning' | 'critical'>('Todas')
+  const [masterPanelModuleFilter, setMasterPanelModuleFilter] = useState('Todos')
 
   const currentCompany =
     currentCompanyId === null ? null : companies.find((item) => item.id === currentCompanyId) ?? null
+  const currentCompanyUserMemberships = session?.kind === 'companyUser' ? session.memberships : []
+  const currentCompanyMembershipCompanies =
+    session?.kind === 'companyUser'
+      ? session.memberships
+          .map((membership) => companies.find((item) => item.id === membership.companyId) ?? null)
+          .filter((item): item is CompanyRecord => item !== null)
+      : []
   const currentAgreement =
     currentCompany?.collectiveAgreementId === null || currentCompany?.collectiveAgreementId === undefined
       ? null
@@ -1506,6 +1248,12 @@ function App() {
   const availableSectorNames = Array.from(new Set(companySectors.map((item) => item.name))).sort((left, right) =>
     left.localeCompare(right),
   )
+  const additionalUserCompanyOptions =
+    currentCompanyId === null
+      ? []
+      : companies
+          .filter((item) => item.id !== currentCompanyId && item.status === 'ATIVA')
+          .sort((left, right) => left.tradeName.localeCompare(right.tradeName))
   const activeFunctionLimit = collaboratorForm.employmentType === 'EXTRA' ? 6 : 1
   const selectedFunctions = collaboratorForm.functions
   const currentCompanyCollaborator =
@@ -1532,6 +1280,18 @@ function App() {
     currentViewerCollaboratorId === null
       ? null
       : companyCollaborators.find((item) => item.id === currentViewerCollaboratorId) ?? null
+  const effectiveSectionAccess =
+    session?.kind === 'systemAdmin'
+      ? appSections.reduce(
+          (accumulator, section) => {
+            accumulator[section] = true
+            return accumulator
+          },
+          {} as UserSectionAccess,
+        )
+      : session?.kind === 'companyUser'
+        ? normalizeSectionAccess(session.user.role, session.user.sectionAccess)
+        : buildDefaultSectionAccessByRole('Visualizador')
   const sessionSectorAccess =
     session?.kind === 'systemAdmin' || session?.user.role === 'Administrativo'
       ? availableSectorNames
@@ -1539,9 +1299,10 @@ function App() {
         ? session.user.sectors
         : []
   const canManageData = !!currentCompany && !isViewer
-  const canViewScale = !!currentCompany
+  const canViewScale = !!currentCompany && effectiveSectionAccess.Escala
   const canEditScale =
     !!currentCompany &&
+    effectiveSectionAccess.Escala &&
     (session?.kind === 'systemAdmin' || (session?.kind === 'companyUser' && session.user.role !== 'Visualizador'))
   const todayIso = toIsoDate(new Date())
   const visibleScaleSectorOptions =
@@ -1550,11 +1311,12 @@ function App() {
     scaleSectorFilter === 'Todos' || !visibleScaleSectorOptions.includes(scaleSectorFilter)
       ? 'Todos'
       : scaleSectorFilter
-  const visibleAppSections: AppSection[] = isViewer ? ['Escala'] : [...appSections]
+  const visibleAppSections: AppSection[] = appSections.filter((section) => effectiveSectionAccess[section])
   const canManageCollaboratorActivation =
-    session?.kind === 'systemAdmin' ||
-    session?.user.role === 'Administrativo' ||
-    session?.user.role === 'Gestor'
+    effectiveSectionAccess.Colaboradores &&
+    (session?.kind === 'systemAdmin' ||
+      session?.user.role === 'Administrativo' ||
+      session?.user.role === 'Gestor')
   const currentSessionActor =
     session === null
       ? null
@@ -1562,6 +1324,27 @@ function App() {
           name: session.user.fullName,
           role: session.kind === 'systemAdmin' ? 'Master' : session.user.role,
         }
+  const currentCompanyAuditLogs = getCurrentCompanyAuditLogs(auditLogs, currentCompanyId)
+  const auditAlertLogs = getAuditAlertLogs(currentCompanyAuditLogs)
+  const auditImpactLogs = getAuditImpactLogs(currentCompanyAuditLogs)
+  const masterPanelModuleOptions = [
+    'Todos',
+    ...Array.from(new Set(currentCompanyAuditLogs.map((item) => item.module))).sort((left, right) =>
+      left.localeCompare(right),
+    ),
+  ]
+  const activeMasterPanelLogs = filterAuditLogs(
+    activeMasterPanelSection === 'Auditoria'
+      ? currentCompanyAuditLogs
+      : activeMasterPanelSection === 'Alertas'
+        ? auditAlertLogs
+        : auditImpactLogs,
+    {
+      search: masterPanelSearch,
+      module: masterPanelModuleFilter,
+      severity: masterPanelSeverityFilter,
+    },
+  )
   const scaleNotificationItems =
     currentSessionKey === null
       ? []
@@ -1718,34 +1501,24 @@ function App() {
   const liveSchedulePreview = buildSchedulePreview(scheduleForm)
   const liveWorkedMinutes = computeScheduleNetMinutes(scheduleForm)
   const activeReportDataset = getActiveReportDataset()
-  const activeVisibleReportColumnKeys =
-    reportVisibleColumnsByReport[selectedReportId] ?? activeReportDataset.columns.map((column) => column.key)
-  const visibleReportColumns = activeReportDataset.columns.filter((column) =>
-    activeVisibleReportColumnKeys.includes(column.key),
+  const activeVisibleReportColumnKeys = getVisibleReportColumnKeys(
+    selectedReportId,
+    reportVisibleColumnsByReport,
+    activeReportDataset.columns,
   )
-  const hiddenReportColumns = activeReportDataset.columns.filter(
-    (column) => !activeVisibleReportColumnKeys.includes(column.key),
-  )
+  const { visibleColumns: visibleReportColumns, hiddenColumns: hiddenReportColumns } =
+    splitReportColumnsByVisibility(activeReportDataset.columns, activeVisibleReportColumnKeys)
   const activeReportColumnFilters = reportColumnFiltersByReport[selectedReportId] ?? {}
-  const reportColumnDistinctValues = Object.fromEntries(
-    activeReportDataset.columns.map((column) => [
-      column.key,
-      Array.from(new Set(activeReportDataset.rows.map((row) => String(row[column.key] ?? '')))).sort((left, right) =>
-        left.localeCompare(right),
-      ),
-    ]),
-  ) as Record<string, string[]>
-  const filteredReportRows = activeReportDataset.rows.filter((row) => {
-    return activeReportDataset.columns.every((column) => {
-      const selectedValues = activeReportColumnFilters[column.key] ?? []
-      if (selectedValues.length === 0) {
-        return true
-      }
-
-      return selectedValues.includes(String(row[column.key] ?? ''))
-    })
-  })
-  const reportPreviewRows = filteredReportRows.slice(0, 24)
+  const reportColumnDistinctValues = getReportColumnDistinctValues(
+    activeReportDataset.columns,
+    activeReportDataset.rows,
+  )
+  const filteredReportRows = filterReportRows(
+    activeReportDataset.columns,
+    activeReportDataset.rows,
+    activeReportColumnFilters,
+  )
+  const reportPreviewRows = getReportPreviewRows(filteredReportRows)
   const reportSectorOptions = ['Todos', ...availableSectorNames]
   const workloadBySectorChart = Array.from(
     getAssignmentsInReportRange().reduce((accumulator, assignment) => {
@@ -1789,100 +1562,120 @@ function App() {
     .map(([label, value]) => ({ label, value, displayValue: String(value) }))
 
   function resetForms() {
-    setFunctionForm(emptyFunctionForm)
-    setCollaboratorForm(emptyCollaboratorForm)
-    setScheduleForm(emptyScheduleForm)
-    setUserForm(emptyUserForm)
-    setAgreementForm(emptyAgreementForm)
-    setEditingAgreementId(null)
-    setScheduleFeedback(null)
-    setEditingFunctionId(null)
-    setEditingScheduleId(null)
-    setEditingUserId(null)
-    setFunctionSuggestion('')
-    setUserSectorInput('')
-    setCollaboratorLookupFeedback('')
+    const resetState = buildResetFormState({
+      emptyFunctionForm,
+      emptyCollaboratorForm,
+      emptyScheduleForm,
+      emptyUserForm,
+      emptyAgreementForm,
+    })
+    setFunctionForm(resetState.functionForm)
+    setCollaboratorForm(resetState.collaboratorForm)
+    setScheduleForm(resetState.scheduleForm)
+    setUserForm(resetState.userForm)
+    setAgreementForm(resetState.agreementForm)
+    setEditingAgreementId(resetState.editingAgreementId)
+    setScheduleFeedback(resetState.scheduleFeedback)
+    setEditingFunctionId(resetState.editingFunctionId)
+    setEditingScheduleId(resetState.editingScheduleId)
+    setEditingUserId(resetState.editingUserId)
+    setFunctionSuggestion(resetState.functionSuggestion)
+    setUserSectorInput(resetState.userSectorInput)
+    setCollaboratorLookupFeedback(resetState.collaboratorLookupFeedback)
+  }
+
+  function confirmDiscardChanges() {
+    if (
+      !hasUnsavedChangesInCurrentView({
+        companyForm,
+        companySnapshot: buildCompanyFormSnapshot(currentCompany, emptyCompanyForm),
+        companyAgreementFeedback,
+        functionForm,
+        functionSnapshot: buildFunctionFormSnapshot(editingFunctionId, functions, emptyFunctionForm),
+        collaboratorForm,
+        emptyCollaboratorForm,
+        scheduleForm,
+        scheduleSnapshot: buildScheduleFormSnapshot(editingScheduleId, schedules, emptyScheduleForm),
+        userForm,
+        userSnapshot: buildUserFormSnapshot(
+          editingUserId,
+          users,
+          emptyUserForm,
+          (role, sectionAccess) => normalizeSectionAccess(role as CompanyRole, sectionAccess),
+          getCompanyUserMembershipsForUser,
+        ),
+        agreementForm,
+        agreementSnapshot: buildAgreementFormSnapshot(editingAgreementId, agreements, emptyAgreementForm),
+        scaleCommentDraft,
+        editingScaleCommentDraft,
+      })
+    ) {
+      return true
+    }
+
+    return window.confirm('Existem alteracoes nao salvas. Deseja descartar esse progresso?')
+  }
+
+  function handleSectionSelection(section: ActiveSection) {
+    if (section === activeSection) {
+      return
+    }
+
+    if (!confirmDiscardChanges()) {
+      return
+    }
+
+    if (section !== 'PainelMaster') {
+      resetForms()
+      closeScaleCommentModal(true)
+    }
+
+    setActiveSection(section)
   }
 
   function toggleReportColumnVisibility(columnKey: string) {
     setReportVisibleColumnsByReport((current) => {
-      const currentKeys = current[selectedReportId] ?? activeReportDataset.columns.map((column) => column.key)
-      const hasColumn = currentKeys.includes(columnKey)
-      if (hasColumn && currentKeys.length === 1) {
-        return current
-      }
-
-      const nextKeys = hasColumn
-        ? currentKeys.filter((key) => key !== columnKey)
-        : [...currentKeys, columnKey]
-
-      return {
-        ...current,
-        [selectedReportId]: activeReportDataset.columns
-          .map((column) => column.key)
-          .filter((key) => nextKeys.includes(key)),
-      }
+      return toggleVisibleReportColumn(
+        current,
+        selectedReportId,
+        activeReportDataset.columns.map((column) => column.key),
+        columnKey,
+      )
     })
   }
 
   function showReportColumn(columnKey: string) {
     setReportVisibleColumnsByReport((current) => {
-      const baseKeys = current[selectedReportId] ?? activeReportDataset.columns.map((column) => column.key)
-      if (baseKeys.includes(columnKey)) {
-        return current
-      }
-
-      const nextKeys = activeReportDataset.columns
-        .map((column) => column.key)
-        .filter((key) => key === columnKey || baseKeys.includes(key))
-
-      return {
-        ...current,
-        [selectedReportId]: nextKeys,
-      }
+      return showVisibleReportColumn(
+        current,
+        selectedReportId,
+        activeReportDataset.columns.map((column) => column.key),
+        columnKey,
+      )
     })
   }
 
   function toggleReportColumnFilterValue(columnKey: string, value: string) {
     setReportColumnFiltersByReport((current) => {
-      const currentReportFilters = current[selectedReportId] ?? {}
-      const currentValues = currentReportFilters[columnKey] ?? []
-      const nextValues = currentValues.includes(value)
-        ? currentValues.filter((item) => item !== value)
-        : [...currentValues, value]
-
-      return {
-        ...current,
-        [selectedReportId]: {
-          ...currentReportFilters,
-          [columnKey]: nextValues,
-        },
-      }
+      return toggleReportColumnFilterSelection(current, selectedReportId, columnKey, value)
     })
   }
 
   function clearReportColumnFilter(columnKey: string) {
     setReportColumnFiltersByReport((current) => {
-      const currentReportFilters = current[selectedReportId] ?? {}
-      return {
-        ...current,
-        [selectedReportId]: {
-          ...currentReportFilters,
-          [columnKey]: [],
-        },
-      }
+      return clearReportColumnFilterSelection(current, selectedReportId, columnKey)
     })
   }
 
   function resetReportTablePreferences() {
-    setReportVisibleColumnsByReport((current) => ({
-      ...current,
-      [selectedReportId]: activeReportDataset.columns.map((column) => column.key),
-    }))
-    setReportColumnFiltersByReport((current) => ({
-      ...current,
-      [selectedReportId]: {},
-    }))
+    setReportVisibleColumnsByReport((current) =>
+      resetReportTableVisibleColumns(
+        current,
+        selectedReportId,
+        activeReportDataset.columns.map((column) => column.key),
+      ),
+    )
+    setReportColumnFiltersByReport((current) => resetReportTableFilters(current, selectedReportId))
     setOpenReportColumnMenu(null)
   }
 
@@ -1892,21 +1685,13 @@ function App() {
     }
 
     const XLSX = await import('xlsx')
-
-    const aoa: Array<Array<string | number>> = [
-      [activeReportDataset.title],
-      [`Empresa: ${currentCompany.tradeName}`],
-      [`Periodo: ${formatMonthDateLabel(reportStartDate)} a ${formatMonthDateLabel(reportEndDate)}`],
-      [],
-      ['Resumo'],
-      ...activeReportDataset.summary.map((item) => [item.label, item.value]),
-      ['Linhas filtradas', String(filteredReportRows.length)],
-      [],
-      visibleReportColumns.map((column) => column.label),
-      ...filteredReportRows.map((row) =>
-        visibleReportColumns.map((column) => row[column.key] ?? ''),
-      ),
-    ]
+    const aoa = buildReportWorksheetRows({
+      companyTradeName: currentCompany.tradeName,
+      periodLabel: `${formatMonthDateLabel(reportStartDate)} a ${formatMonthDateLabel(reportEndDate)}`,
+      dataset: activeReportDataset,
+      visibleColumns: visibleReportColumns,
+      filteredRows: filteredReportRows,
+    })
 
     const workbook = XLSX.utils.book_new()
     const worksheet = XLSX.utils.aoa_to_sheet(aoa)
@@ -1927,71 +1712,16 @@ function App() {
       return
     }
 
-    const html = `<!doctype html>
-      <html lang="pt-BR">
-        <head>
-          <meta charset="utf-8" />
-          <title>${escapeHtml(`relatorio-${currentCompany.tradeName}-${activeReportDataset.filenameSuffix}`)}</title>
-          <style>
-            body { font-family: Arial, sans-serif; margin: 24px; color: #1f1713; }
-            h1, h2 { margin: 0 0 8px; }
-            p { margin: 0 0 8px; }
-            .meta { margin-bottom: 18px; color: #5d514a; }
-            .summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 20px 0; }
-            .summary-card { border: 1px solid #d9c5b3; border-radius: 10px; padding: 12px; }
-            .summary-card strong { display: block; margin-top: 6px; }
-            table { width: 100%; border-collapse: collapse; margin-top: 18px; font-size: 12px; }
-            th, td { border: 1px solid #d9c5b3; padding: 8px; text-align: left; vertical-align: top; }
-            th { background: #f6e8d9; }
-            .right { text-align: right; }
-            .center { text-align: center; }
-            @media print { body { margin: 12mm; } }
-          </style>
-        </head>
-        <body>
-          <h1>${escapeHtml(activeReportDataset.title)}</h1>
-          <p class="meta"><strong>Empresa:</strong> ${escapeHtml(currentCompany.tradeName)} | <strong>Periodo:</strong> ${escapeHtml(
-            `${formatMonthDateLabel(reportStartDate)} a ${formatMonthDateLabel(reportEndDate)}`,
-          )} | <strong>Destino:</strong> ${mode === 'pdf' ? 'Salvar como PDF' : 'Impressao'}</p>
-          <section class="summary">
-            ${activeReportDataset.summary
-              .map(
-                (item) =>
-                  `<div class="summary-card"><span>${escapeHtml(item.label)}</span><strong>${escapeHtml(
-                    item.value,
-                  )}</strong></div>`,
-              )
-              .join('')}
-          </section>
-          <table>
-            <thead>
-              <tr>
-                ${visibleReportColumns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join('')}
-              </tr>
-            </thead>
-            <tbody>
-              ${filteredReportRows
-                .map(
-                  (row) =>
-                    `<tr>${visibleReportColumns
-                      .map((column) => {
-                        const value = row[column.key] ?? ''
-                        const className =
-                          column.align === 'right' ? 'right' : column.align === 'center' ? 'center' : ''
-                        return `<td class="${className}">${escapeHtml(String(value))}</td>`
-                      })
-                      .join('')}</tr>`,
-                )
-                .join('')}
-            </tbody>
-          </table>
-          <script>
-            window.onload = function () {
-              window.print();
-            };
-          </script>
-        </body>
-      </html>`
+    const html = buildReportPrintHtml({
+      documentTitle: `relatorio-${currentCompany.tradeName}-${activeReportDataset.filenameSuffix}`,
+      companyTradeName: currentCompany.tradeName,
+      periodLabel: `${formatMonthDateLabel(reportStartDate)} a ${formatMonthDateLabel(reportEndDate)}`,
+      mode,
+      dataset: activeReportDataset,
+      visibleColumns: visibleReportColumns,
+      filteredRows: filteredReportRows,
+      escapeHtml,
+    })
 
     reportWindow.document.open()
     reportWindow.document.write(html)
@@ -1999,58 +1729,11 @@ function App() {
   }
 
   function ensureCompanySector(companyId: number, sectorName: string) {
-    const trimmedSector = sectorName.trim()
-    if (!trimmedSector) {
-      return
-    }
-
-    setSectors((current) => {
-      const alreadyExists = current.some(
-        (item) =>
-          item.companyId === companyId &&
-          item.name.trim().toLowerCase() === trimmedSector.toLowerCase(),
-      )
-
-      if (alreadyExists) {
-        return current
-      }
-
-      return [
-        ...current,
-        {
-          id: current.reduce((max, item) => Math.max(max, item.id), 0) + 1,
-          companyId,
-          name: trimmedSector,
-        },
-      ]
-    })
-  }
-
-  function resolveCompanySectorName(companyId: number, sectorName: string) {
-    const trimmedSector = sectorName.trim()
-    if (!trimmedSector) {
-      return ''
-    }
-
-    const existingSector = sectors.find(
-      (item) =>
-        item.companyId === companyId &&
-        item.name.trim().toLowerCase() === trimmedSector.toLowerCase(),
-    )
-
-    return existingSector?.name ?? trimmedSector
+    setSectors((current) => ensureCompanySectorInCollection(current, companyId, sectorName))
   }
 
   function toggleUserSector(sectorName: string) {
-    setUserForm((current) => {
-      const exists = current.sectors.includes(sectorName)
-      return {
-        ...current,
-        sectors: exists
-          ? current.sectors.filter((item) => item !== sectorName)
-          : [...current.sectors, sectorName],
-      }
-    })
+    setUserForm((current) => toggleUserSectorSelection(current, sectorName))
   }
 
   function addUserSector() {
@@ -2063,14 +1746,9 @@ function App() {
       return
     }
 
-    const resolvedSector = resolveCompanySectorName(currentCompanyId, trimmedSector)
+    const resolvedSector = resolveCompanySectorName(sectors, currentCompanyId, trimmedSector)
     ensureCompanySector(currentCompanyId, resolvedSector)
-    setUserForm((current) => ({
-      ...current,
-      sectors: current.sectors.includes(resolvedSector)
-        ? current.sectors
-        : [...current.sectors, resolvedSector],
-    }))
+    setUserForm((current) => addResolvedSectorToUserForm(current, resolvedSector))
     setUserSectorInput('')
   }
 
@@ -2106,17 +1784,23 @@ function App() {
 
   function openScaleCommentModal(collaboratorId: number, date: string) {
     markScaleThreadAsRead(collaboratorId, date)
-    setScaleCommentModal({ collaboratorId, date })
-    setScaleCommentDraft('')
-    setEditingScaleCommentId(null)
-    setEditingScaleCommentDraft('')
+    const nextState = buildScaleCommentModalOpenState(collaboratorId, date)
+    setScaleCommentModal(nextState.scaleCommentModal)
+    setScaleCommentDraft(nextState.scaleCommentDraft)
+    setEditingScaleCommentId(nextState.editingScaleCommentId)
+    setEditingScaleCommentDraft(nextState.editingScaleCommentDraft)
   }
 
-  function closeScaleCommentModal() {
-    setScaleCommentModal(null)
-    setScaleCommentDraft('')
-    setEditingScaleCommentId(null)
-    setEditingScaleCommentDraft('')
+  function closeScaleCommentModal(force = false) {
+    if (!force && !confirmDiscardChanges()) {
+      return
+    }
+
+    const nextState = buildScaleCommentModalClosedState()
+    setScaleCommentModal(nextState.scaleCommentModal)
+    setScaleCommentDraft(nextState.scaleCommentDraft)
+    setEditingScaleCommentId(nextState.editingScaleCommentId)
+    setEditingScaleCommentDraft(nextState.editingScaleCommentDraft)
   }
 
   function getCommentRecipientKeys(collaboratorId: number) {
@@ -2249,6 +1933,21 @@ function App() {
       }),
     )
 
+    if (currentSessionActor && currentCompanyId) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Comentarios',
+        action: 'Atualizacao',
+        targetType: 'Comentario de escala',
+        targetLabel: scaleCommentModal.date,
+        severity: 'warning',
+        impactSummary: 'Comentario de escala editado.',
+        relatedCompanyIds: [currentCompanyId],
+      })
+    }
+
     cancelScaleCommentEdit()
   }
 
@@ -2277,6 +1976,21 @@ function App() {
 
     if (editingScaleCommentId === messageId) {
       cancelScaleCommentEdit()
+    }
+
+    if (currentSessionActor && currentCompanyId) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Comentarios',
+        action: 'Exclusao',
+        targetType: 'Comentario de escala',
+        targetLabel: scaleCommentModal.date,
+        severity: 'warning',
+        impactSummary: 'Comentario de escala excluido.',
+        relatedCompanyIds: [currentCompanyId],
+      })
     }
   }
 
@@ -2332,7 +2046,107 @@ function App() {
       ]
     })
 
+    appendAuditLog({
+      companyId: currentCompanyId,
+      actorName: currentSessionActor.name,
+      actorRole: currentSessionActor.role,
+      module: 'Comentarios',
+      action: 'Criacao',
+      targetType: 'Comentario de escala',
+      targetLabel: scaleCommentModal.date,
+      severity: 'info',
+      impactSummary: 'Novo comentario registrado na escala.',
+      relatedCompanyIds: [currentCompanyId],
+    })
+
     setScaleCommentDraft('')
+  }
+
+  function buildAuditTrailReport(): ReportDataset {
+    const rows = currentCompanyAuditLogs
+      .filter((item) => {
+        const eventDate = item.createdAt.slice(0, 10)
+        return eventDate >= reportStartDate && eventDate <= reportEndDate
+      })
+      .map((item) => ({
+        dataHora: formatDateTimeLabel(item.createdAt),
+        modulo: item.module,
+        acao: item.action,
+        alvo: item.targetLabel,
+        ator: item.actorName,
+        perfil: item.actorRole,
+        severidade: item.severity,
+        impacto: item.impactSummary,
+      }))
+
+    return {
+      id: 'audit-trail',
+      title: 'Auditoria operacional',
+      description: 'Eventos administrativos e operacionais registrados na empresa ativa.',
+      filenameSuffix: 'auditoria-operacional',
+      summary: [
+        { label: 'Eventos', value: String(rows.length) },
+        { label: 'Alertas', value: String(rows.filter((item) => item.severidade !== 'info').length) },
+        { label: 'Usuarios atores', value: String(new Set(rows.map((item) => item.ator)).size) },
+      ],
+      columns: [
+        { key: 'dataHora', label: 'Data/hora' },
+        { key: 'modulo', label: 'Modulo' },
+        { key: 'acao', label: 'Acao' },
+        { key: 'alvo', label: 'Alvo' },
+        { key: 'ator', label: 'Ator' },
+        { key: 'perfil', label: 'Perfil' },
+        { key: 'severidade', label: 'Severidade', align: 'center' },
+        { key: 'impacto', label: 'Impacto' },
+      ],
+      rows,
+    }
+  }
+
+  function buildCommentActivityReport(): ReportDataset {
+    const rows = companyScaleComments
+      .filter((thread) => thread.date >= reportStartDate && thread.date <= reportEndDate)
+      .flatMap((thread) => {
+        const collaborator = companyCollaborators.find((item) => item.id === thread.collaboratorId) ?? null
+        if (!collaborator || !matchesReportSector(collaborator)) {
+          return []
+        }
+
+        return thread.messages.map((message) => ({
+          dataEscala: formatMonthDateLabel(thread.date),
+          colaborador: getReportCollaboratorName(collaborator),
+          setor: getReportSectorName(collaborator),
+          funcao: getReportFunctionName(collaborator),
+          autor: message.authorName,
+          perfil: message.authorRole,
+          dataHora: formatDateTimeLabel(message.createdAt),
+          mensagem: message.body,
+        }))
+      })
+      .sort((left, right) => String(right.dataHora).localeCompare(String(left.dataHora)))
+
+    return {
+      id: 'comment-activity',
+      title: 'Atividade de comentarios',
+      description: 'Comentarios e respostas registrados na escala dentro do periodo.',
+      filenameSuffix: 'atividade-comentarios',
+      summary: [
+        { label: 'Mensagens', value: String(rows.length) },
+        { label: 'Colaboradores citados', value: String(new Set(rows.map((item) => item.colaborador)).size) },
+        { label: 'Autores', value: String(new Set(rows.map((item) => item.autor)).size) },
+      ],
+      columns: [
+        { key: 'dataEscala', label: 'Data da escala' },
+        { key: 'colaborador', label: 'Colaborador' },
+        { key: 'setor', label: 'Setor' },
+        { key: 'funcao', label: 'Funcao' },
+        { key: 'autor', label: 'Autor' },
+        { key: 'perfil', label: 'Perfil' },
+        { key: 'dataHora', label: 'Data/hora' },
+        { key: 'mensagem', label: 'Mensagem' },
+      ],
+      rows,
+    }
   }
 
   function getScaleSchedulesForDate(date: string, currentScheduleId?: number) {
@@ -3066,6 +2880,10 @@ function App() {
         return buildScheduleUsageReport()
       case 'user-access':
         return buildUserAccessReport()
+      case 'audit-trail':
+        return buildAuditTrailReport()
+      case 'comment-activity':
+        return buildCommentActivityReport()
       case 'scale-consolidated':
       default:
         return buildScaleConsolidatedReport()
@@ -3291,6 +3109,24 @@ function App() {
         },
       ]
     })
+
+    if (currentSessionActor) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Escala',
+        action: 'Atualizacao',
+        targetType: 'Escala',
+        targetLabel: `${getCollaboratorProfile(collaborator.cpf)?.fullName ?? collaborator.cpf} • ${date}`,
+        severity: validation.issues.length > 0 ? 'warning' : 'info',
+        impactSummary:
+          validation.issues.length > 0
+            ? 'Atribuicao de escala alterada com alerta de irregularidade.'
+            : 'Atribuicao de escala alterada manualmente.',
+        relatedCompanyIds: [currentCompanyId],
+      })
+    }
   }
 
   function handleScalePrint() {
@@ -3326,28 +3162,80 @@ function App() {
       state: company.state,
       collectiveAgreementId: company.collectiveAgreementId ? String(company.collectiveAgreementId) : '',
     })
+    setScaleViewMode(company.defaultScaleViewMode ?? 'week')
+    setPrintIncludeExtras(company.defaultPrintIncludeExtras ?? false)
+    setSelectedReportId(company.defaultReportId ?? 'scale-consolidated')
   }
 
   function switchCompany(companyId: number) {
-    const targetCompany = companies.find((item) => item.id === companyId)
+    if (!confirmDiscardChanges()) {
+      return
+    }
+
+    const targetCompany = findCompanyById(companies, companyId)
     if (!targetCompany) {
       return
+    }
+
+    if (session?.kind === 'companyUser') {
+      const targetMembership = session.memberships.find((item) => item.companyId === companyId)
+      if (!targetMembership) {
+        return
+      }
+
+      if (targetCompany.status === 'INATIVA') {
+        setLoginError('A empresa selecionada esta inativa.')
+        return
+      }
+
+      if (targetMembership.id !== session.user.id) {
+        setSession({
+          kind: 'companyUser',
+          user: targetMembership,
+          memberships: session.memberships,
+        })
+      }
     }
 
     setCurrentCompanyId(companyId)
     populateCompanyForm(targetCompany)
     resetForms()
     setActiveSection('Painel')
+    setLoginError('')
+    if (session) {
+      appendAuditLog({
+        companyId,
+        actorName: session.user.fullName,
+        actorRole: session.kind === 'systemAdmin' ? 'Master' : session.user.role,
+        module: 'Sessao',
+        action: 'Troca de empresa',
+        targetType: 'Empresa',
+        targetLabel: targetCompany.tradeName,
+        severity: 'info',
+        impactSummary: `Empresa ativa alterada para ${targetCompany.tradeName}.`,
+        relatedCompanyIds: [companyId],
+      })
+    }
   }
 
   function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
-    const systemAdmin = systemAdmins.find(
-      (item) => item.username === loginForm.username.trim() && item.password === loginForm.password,
-    )
+    const systemAdmin = findSystemAdminByCredentials(systemAdmins, loginForm.username, loginForm.password)
 
     if (systemAdmin) {
+      appendAuditLog({
+        companyId: null,
+        actorName: systemAdmin.fullName,
+        actorRole: 'Master',
+        module: 'Sessao',
+        action: 'Login',
+        targetType: 'Sessao',
+        targetLabel: 'Administrador do sistema',
+        severity: 'info',
+        impactSummary: 'Login master realizado com sucesso.',
+        relatedCompanyIds: [],
+      })
       setSession({ kind: 'systemAdmin', user: systemAdmin })
       setLoginError('')
       if (companies.length > 0) {
@@ -3357,36 +3245,76 @@ function App() {
       return
     }
 
-    const companyUser = users.find(
-      (item) =>
-        item.username === loginForm.username.trim() &&
-        item.password === loginForm.password &&
-        item.isActive,
+    const companyUserMemberships = getActiveCompanyUserMemberships(
+      getCompanyUserMembershipsFromCredentials(
+        users,
+        loginForm.username,
+        loginForm.password,
+      ),
+      companies,
     )
 
-    if (!companyUser) {
+    if (companyUserMemberships.length === 0) {
       setLoginError('Usuario ou senha invalidos.')
       return
     }
 
-    const targetCompany = companies.find((item) => item.id === companyUser.companyId)
-    if (!targetCompany) {
-      setLoginError('A empresa vinculada a este usuario nao esta disponivel.')
+    const { primaryMembership, targetCompany, nextCompanyId, requiresCompanySelection } = resolveCompanyLoginResult(
+      companyUserMemberships,
+      companies,
+    )
+    if (!primaryMembership) {
+      setLoginError('Usuario ou senha invalidos.')
       return
     }
-
-    if (targetCompany.status === 'INATIVA') {
-      setLoginError('A empresa vinculada a este usuario esta inativa.')
-      return
+    setSession({
+      kind: 'companyUser',
+      user: primaryMembership,
+      memberships: companyUserMemberships,
+    })
+    appendAuditLog({
+      companyId: companyUserMemberships.length === 1 ? primaryMembership.companyId : null,
+      actorName: primaryMembership.fullName,
+      actorRole: primaryMembership.role,
+      module: 'Sessao',
+      action: 'Login',
+      targetType: 'Sessao',
+      targetLabel: primaryMembership.username,
+      severity: 'info',
+      impactSummary:
+        !requiresCompanySelection
+          ? `Login realizado na empresa ${targetCompany?.tradeName ?? primaryMembership.companyId}.`
+          : 'Login multiempresa realizado com selecao de empresa pendente.',
+      relatedCompanyIds: companyUserMemberships.map((item) => item.companyId),
+    })
+    setCurrentCompanyId(nextCompanyId)
+    if (targetCompany && !requiresCompanySelection) {
+      populateCompanyForm(targetCompany)
+    } else {
+      setCompanyForm(emptyCompanyForm)
     }
-
-    setSession({ kind: 'companyUser', user: companyUser })
-    setCurrentCompanyId(companyUser.companyId)
-    populateCompanyForm(targetCompany)
     setLoginError('')
   }
 
   function logout() {
+    if (!confirmDiscardChanges()) {
+      return
+    }
+
+    if (session) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: session.user.fullName,
+        actorRole: session.kind === 'systemAdmin' ? 'Master' : session.user.role,
+        module: 'Sessao',
+        action: 'Logout',
+        targetType: 'Sessao',
+        targetLabel: session.user.fullName,
+        severity: 'info',
+        impactSummary: 'Sessao encerrada manualmente.',
+        relatedCompanyIds: currentCompanyId === null ? [] : [currentCompanyId],
+      })
+    }
     setSession(null)
     setCurrentCompanyId(null)
     setLoginForm({ username: '', password: '' })
@@ -3395,6 +3323,10 @@ function App() {
   }
 
   function startAgreementFromCompanyContext() {
+    if (!confirmDiscardChanges()) {
+      return
+    }
+
     setAgreementForm((current) => ({
       ...current,
       coveredState: companyForm.state,
@@ -3431,6 +3363,10 @@ function App() {
         collectiveAgreementId,
         suggestedCollectiveAgreementId,
         collectiveProfile: 'padrao',
+        defaultScaleViewMode: 'week',
+        defaultReportId: 'scale-consolidated',
+        defaultPrintIncludeExtras: false,
+        allowPastScaleEdits: false,
         tradeName: companyForm.tradeName.trim(),
         legalName: companyForm.legalName.trim(),
         cnpj: companyForm.cnpj.trim(),
@@ -3444,6 +3380,20 @@ function App() {
       }
 
       setCompanies((current) => [newCompany, ...current])
+      if (currentSessionActor) {
+        appendAuditLog({
+          companyId: newCompany.id,
+          actorName: currentSessionActor.name,
+          actorRole: currentSessionActor.role,
+          module: 'Empresa',
+          action: 'Criacao',
+          targetType: 'Empresa',
+          targetLabel: newCompany.tradeName,
+          severity: 'critical',
+          impactSummary: 'Nova empresa cadastrada no sistema.',
+          relatedCompanyIds: [newCompany.id],
+        })
+      }
       populateCompanyForm(newCompany)
       setCurrentCompanyId(newCompany.id)
       setIsCompanyModalOpen(false)
@@ -3463,6 +3413,10 @@ function App() {
               ...item,
               collectiveAgreementId,
               suggestedCollectiveAgreementId,
+              defaultScaleViewMode: item.defaultScaleViewMode ?? 'week',
+              defaultReportId: item.defaultReportId ?? 'scale-consolidated',
+              defaultPrintIncludeExtras: item.defaultPrintIncludeExtras ?? false,
+              allowPastScaleEdits: item.allowPastScaleEdits ?? false,
               tradeName: companyForm.tradeName.trim(),
               legalName: companyForm.legalName.trim(),
               cnpj: companyForm.cnpj.trim(),
@@ -3477,6 +3431,20 @@ function App() {
           : item,
       ),
     )
+    if (currentSessionActor && currentCompany) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Empresa',
+        action: 'Atualizacao',
+        targetType: 'Empresa',
+        targetLabel: currentCompany.tradeName,
+        severity: 'warning',
+        impactSummary: 'Dados cadastrais da empresa foram atualizados.',
+        relatedCompanyIds: [currentCompanyId],
+      })
+    }
   }
 
   function deleteCompany(companyId: number) {
@@ -3493,6 +3461,20 @@ function App() {
     setScaleAssignments((current) => current.filter((item) => item.companyId !== companyId))
     setScaleExtraRoster((current) => current.filter((item) => item.companyId !== companyId))
     setUsers((current) => current.filter((item) => item.companyId !== companyId))
+    if (currentSessionActor && targetCompany) {
+      appendAuditLog({
+        companyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Empresa',
+        action: 'Exclusao',
+        targetType: 'Empresa',
+        targetLabel: targetCompany.tradeName,
+        severity: 'critical',
+        impactSummary: 'Empresa removida do sistema.',
+        relatedCompanyIds: [companyId],
+      })
+    }
 
     if (currentCompanyId === companyId) {
       setCurrentCompanyId(null)
@@ -3502,6 +3484,7 @@ function App() {
   }
 
   function toggleCompanyStatus(companyId: number) {
+    const targetCompany = companies.find((item) => item.id === companyId) ?? null
     setCompanies((current) =>
       current.map((item) =>
         item.id === companyId
@@ -3512,22 +3495,66 @@ function App() {
           : item,
       ),
     )
+    if (currentSessionActor && targetCompany) {
+      appendAuditLog({
+        companyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Empresa',
+        action: 'Status',
+        targetType: 'Empresa',
+        targetLabel: targetCompany.tradeName,
+        severity: 'warning',
+        impactSummary: `Empresa ${targetCompany.status === 'ATIVA' ? 'inativada' : 'ativada'}.`,
+        relatedCompanyIds: [companyId],
+      })
+    }
   }
 
   function updateCompanyCollectiveProfile(
     companyId: number,
     collectiveProfile: CompanyRecord['collectiveProfile'],
   ) {
-    setCompanies((current) =>
-      current.map((item) =>
-        item.id === companyId
-          ? {
-              ...item,
-              collectiveProfile,
-            }
-          : item,
-      ),
-    )
+    setCompanies((current) => updateCompanyCollectiveProfileInCollection(current, companyId, collectiveProfile))
+  }
+
+  function updateCompanyOperationalSettings(
+    companyId: number,
+    updates: Partial<
+      Pick<
+        CompanyRecord,
+        'defaultScaleViewMode' | 'defaultReportId' | 'defaultPrintIncludeExtras' | 'allowPastScaleEdits'
+      >
+    >,
+  ) {
+    const targetCompany = companies.find((item) => item.id === companyId) ?? null
+    setCompanies((current) => updateCompanyOperationalSettingsInCollection(current, companyId, updates))
+
+    if (targetCompany) {
+      if (updates.defaultScaleViewMode) {
+        setScaleViewMode(updates.defaultScaleViewMode)
+      }
+      if (updates.defaultReportId) {
+        setSelectedReportId(updates.defaultReportId)
+      }
+      if (typeof updates.defaultPrintIncludeExtras === 'boolean') {
+        setPrintIncludeExtras(updates.defaultPrintIncludeExtras)
+      }
+      if (currentSessionActor) {
+        appendAuditLog({
+          companyId,
+          actorName: currentSessionActor.name,
+          actorRole: currentSessionActor.role,
+          module: 'Empresa',
+          action: 'Configuracoes operacionais',
+          targetType: 'Empresa',
+          targetLabel: targetCompany.tradeName,
+          severity: 'warning',
+          impactSummary: 'Configuracoes operacionais da empresa foram atualizadas.',
+          relatedCompanyIds: [companyId],
+        })
+      }
+    }
   }
 
   function handleAgreementSubmit(event: FormEvent<HTMLFormElement>) {
@@ -3588,7 +3615,7 @@ function App() {
       return
     }
 
-    const resolvedSector = resolveCompanySectorName(currentCompanyId, functionForm.sector)
+    const resolvedSector = resolveCompanySectorName(sectors, currentCompanyId, functionForm.sector)
     const existingFunction = functions.find((item) => item.id === editingFunctionId) ?? null
 
     const newItem: FunctionRecord = {
@@ -3788,13 +3815,7 @@ function App() {
     if (!validation.valid || !currentCompanyId) {
       setScheduleFeedback(validation)
       if (!validation.valid) {
-        setScheduleWarning({
-          title: 'Horario invalido',
-          messages: [
-            ...validation.errors,
-            ...validation.notes,
-          ],
-        })
+        setScaleWarning(buildInvalidScheduleWarning([...validation.errors, ...validation.notes]))
       }
       return
     }
@@ -3814,16 +3835,9 @@ function App() {
     )
 
     if (duplicateSchedule) {
-      const duplicateFeedback = {
-        valid: false,
-        errors: ['Ja existe um horario cadastrado com essa mesma composicao de turno e pausa.'],
-        notes: ['Edite o horario existente ou altere o novo cadastro para evitar duplicidade.'],
-      }
+      const duplicateFeedback = buildDuplicateScheduleFeedback()
       setScheduleFeedback(duplicateFeedback)
-      setScheduleWarning({
-        title: 'Horario invalido',
-        messages: [...duplicateFeedback.errors, ...duplicateFeedback.notes],
-      })
+      setScaleWarning(buildInvalidScheduleWarning([...duplicateFeedback.errors, ...duplicateFeedback.notes]))
       return
     }
 
@@ -3856,17 +3870,9 @@ function App() {
         ? [newItem, ...current]
         : current.map((item) => (item.id === editingScheduleId ? newItem : item)),
     )
-    setScheduleFeedback({
-      valid: true,
-      errors: [],
-      notes: [
-        editingScheduleId === null
-          ? 'Horario cadastrado com sucesso.'
-          : 'Horario atualizado com sucesso.',
-        ...validation.notes,
-      ],
-      netMinutes: validation.netMinutes,
-    })
+    setScheduleFeedback(
+      buildSuccessfulScheduleFeedback(editingScheduleId !== null, validation.notes, validation.netMinutes),
+    )
     setScheduleForm(emptyScheduleForm)
     setEditingScheduleId(null)
   }
@@ -3877,24 +3883,10 @@ function App() {
       return
     }
 
+    const nextState = buildScheduleEditState(targetSchedule, emptyScheduleForm)
     setEditingScheduleId(scheduleId)
-    setScheduleForm({
-      shiftName: targetSchedule.shiftName,
-      startTime: targetSchedule.startTime,
-      startPeriod: targetSchedule.startPeriod,
-      breakStart: targetSchedule.breakStart,
-      breakStartPeriod: targetSchedule.breakStartPeriod,
-      breakEnd: targetSchedule.breakEnd,
-      breakEndPeriod: targetSchedule.breakEndPeriod,
-      endTime: targetSchedule.endTime,
-      endPeriod: targetSchedule.endPeriod,
-    })
-    setScheduleFeedback({
-      valid: true,
-      errors: [],
-      notes: ['Modo de edicao ativo para este horario.'],
-      netMinutes: targetSchedule.netMinutes,
-    })
+    setScheduleForm(nextState.scheduleForm)
+    setScheduleFeedback(nextState.scheduleFeedback)
   }
 
   function toggleScheduleActivation(scheduleId: number) {
@@ -3929,10 +3921,31 @@ function App() {
       setScheduleForm(emptyScheduleForm)
       setEditingScheduleId(null)
     }
-    setScheduleFeedback({
-      valid: true,
-      errors: [],
-      notes: ['Horario excluido com sucesso.'],
+    setScheduleFeedback(buildDeletedScheduleFeedback())
+  }
+
+  function toggleUserAdditionalCompany(companyId: string) {
+    setUserForm((current) => {
+      const exists = current.additionalCompanyIds.includes(companyId)
+      return {
+        ...current,
+        additionalCompanyIds: exists
+          ? current.additionalCompanyIds.filter((item) => item !== companyId)
+          : [...current.additionalCompanyIds, companyId],
+      }
+    })
+  }
+
+  function toggleUserSectionAccess(section: AppSection) {
+    setUserForm((current) => {
+      const currentValue = current.sectionAccess[section]
+      return {
+        ...current,
+        sectionAccess: {
+          ...current.sectionAccess,
+          [section]: !currentValue,
+        },
+      }
     })
   }
 
@@ -3965,6 +3978,16 @@ function App() {
       validationMessages.push('Selecione ao menos um setor para este usuario.')
     }
 
+    const resolvedSectionAccess = normalizeSectionAccess(userForm.role, userForm.sectionAccess)
+
+    if (!resolvedSectionAccess.Escala) {
+      validationMessages.push('O acesso a Escala e obrigatorio para este tipo de usuario.')
+    }
+
+    if (userForm.role === 'Visualizador' && userForm.additionalCompanyIds.length > 0) {
+      validationMessages.push('Usuario visualizador nao pode ser vinculado automaticamente a outras empresas.')
+    }
+
     const linkedCollaborator =
       userForm.role === 'Visualizador' && userForm.linkedCollaboratorId
         ? companyCollaborators.find((item) => item.id === Number(userForm.linkedCollaboratorId)) ?? null
@@ -3976,50 +3999,106 @@ function App() {
       validationMessages.push('O colaborador vinculado precisa ter uma funcao principal com setor definido.')
     }
 
-    const duplicateUsername = users.find(
+    const duplicateUsername = users.filter(
       (item) =>
         item.id !== editingUserId &&
         item.username.trim().toLowerCase() === userForm.username.trim().toLowerCase(),
     )
-    if (duplicateUsername) {
-      validationMessages.push('Ja existe outro usuario cadastrado com esse login.')
+    if (
+      duplicateUsername.some(
+        (item) =>
+          item.fullName.trim().toLowerCase() !== userForm.fullName.trim().toLowerCase() || item.password !== userForm.password,
+      )
+    ) {
+      validationMessages.push(
+        'Ja existe outro usuario cadastrado com esse login. Para reaproveitar o login em varias empresas, mantenha o mesmo nome e a mesma senha.',
+      )
+    }
+
+    const targetCompanyIds = Array.from(
+      new Set([currentCompanyId, ...userForm.additionalCompanyIds.map((item) => Number(item)).filter(Boolean)]),
+    )
+
+    if (userForm.role !== 'Visualizador') {
+      const companiesWithoutSectors = targetCompanyIds
+        .filter((companyId) => companyId !== currentCompanyId)
+        .map((companyId) => ({
+          companyId,
+          sectors: getSectorNamesForCompany(sectors, companyId),
+          company: companies.find((item) => item.id === companyId) ?? null,
+        }))
+        .filter((item) => item.sectors.length === 0)
+
+      if (companiesWithoutSectors.length > 0) {
+        validationMessages.push(
+          `As empresas ${companiesWithoutSectors
+            .map((item) => item.company?.tradeName ?? String(item.companyId))
+            .join(', ')} precisam ter ao menos um setor cadastrado antes de receber este login.`,
+        )
+      }
     }
 
     if (validationMessages.length > 0) {
-      setUserWarning({
-        title: 'Usuario invalido',
-        messages: validationMessages,
-      })
+      setUserWarning(buildInvalidUserWarning(validationMessages))
       return
     }
 
     const resolvedUserSectors =
       userForm.role === 'Visualizador' && linkedCollaboratorSector
-        ? [resolveCompanySectorName(currentCompanyId, linkedCollaboratorSector)]
-        : userForm.sectors.map((sectorName) => resolveCompanySectorName(currentCompanyId, sectorName))
+        ? [resolveCompanySectorName(sectors, currentCompanyId, linkedCollaboratorSector)]
+        : userForm.sectors.map((sectorName) => resolveCompanySectorName(sectors, currentCompanyId, sectorName))
 
     resolvedUserSectors.forEach((sectorName) => ensureCompanySector(currentCompanyId, sectorName))
 
-    const newItem: CompanyUserRecord = {
-      id: editingUserId ?? Date.now(),
-      companyId: currentCompanyId,
-      fullName: userForm.fullName.trim(),
-      username: userForm.username.trim(),
-      password: userForm.password,
-      role: userForm.role,
-      sectors: resolvedUserSectors,
-      linkedCollaboratorId:
-        userForm.role === 'Visualizador' && userForm.linkedCollaboratorId
-          ? Number(userForm.linkedCollaboratorId)
-          : null,
-      isActive: users.find((item) => item.id === editingUserId)?.isActive ?? true,
-    }
+    const originalUser = editingUserId === null ? null : users.find((item) => item.id === editingUserId) ?? null
+    const originalMembershipGroup =
+      originalUser === null ? [] : getCompanyUserMembershipsForUser(users, originalUser)
+    const originalMembershipIds = new Set(originalMembershipGroup.map((item) => item.id))
+    const baseUserIdSeed = users.reduce((max, item) => Math.max(max, item.id), 0) + 1
 
-    setUsers((current) =>
-      editingUserId === null
-        ? [newItem, ...current]
-        : current.map((item) => (item.id === editingUserId ? newItem : item)),
-    )
+    const nextMemberships = targetCompanyIds.map((companyId, index) => {
+      const existingMembership = originalMembershipGroup.find((item) => item.companyId === companyId) ?? null
+      const companySectorNames =
+        companyId === currentCompanyId ? resolvedUserSectors : getSectorNamesForCompany(sectors, companyId)
+
+      return {
+        id: existingMembership?.id ?? baseUserIdSeed + index,
+        companyId,
+        fullName: userForm.fullName.trim(),
+        username: userForm.username.trim(),
+        password: userForm.password,
+        role: userForm.role,
+        sectors: companySectorNames,
+        sectionAccess: resolvedSectionAccess,
+        linkedCollaboratorId:
+          companyId === currentCompanyId && userForm.role === 'Visualizador' && userForm.linkedCollaboratorId
+            ? Number(userForm.linkedCollaboratorId)
+            : null,
+        isActive: existingMembership?.isActive ?? originalUser?.isActive ?? true,
+      } satisfies CompanyUserRecord
+    })
+
+    setUsers((current) => {
+      const preservedUsers = current.filter((item) => !originalMembershipIds.has(item.id))
+      return [...nextMemberships, ...preservedUsers]
+    })
+    if (currentSessionActor) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Usuarios',
+        action: editingUserId === null ? 'Criacao' : 'Atualizacao',
+        targetType: 'Usuario',
+        targetLabel: userForm.username.trim(),
+        severity: 'critical',
+        impactSummary:
+          editingUserId === null
+            ? 'Novo login cadastrado.'
+            : 'Configuracoes de acesso do usuario foram atualizadas.',
+        relatedCompanyIds: targetCompanyIds,
+      })
+    }
     setUserForm(emptyUserForm)
     setIsUserFormPasswordVisible(false)
     setUserSectorInput('')
@@ -4032,19 +4111,20 @@ function App() {
       return
     }
 
+    const nextState = buildUserEditState(
+      targetUser,
+      (role, sectionAccess) => normalizeSectionAccess(role as CompanyRole, sectionAccess),
+      getCompanyUserMembershipsForUser(users, targetUser)
+        .filter((item) => item.companyId !== targetUser.companyId)
+        .map((item) => String(item.companyId)),
+    )
     setEditingUserId(userId)
-    setUserForm({
-      fullName: targetUser.fullName,
-      username: targetUser.username,
-      password: targetUser.password,
-      role: targetUser.role,
-      sectors: targetUser.sectors,
-      linkedCollaboratorId: targetUser.linkedCollaboratorId ? String(targetUser.linkedCollaboratorId) : '',
-    })
-    setIsUserFormPasswordVisible(false)
+    setUserForm(nextState.userForm)
+    setIsUserFormPasswordVisible(nextState.isUserFormPasswordVisible)
   }
 
   function toggleUserActivation(userId: number) {
+    const targetUser = users.find((item) => item.id === userId) ?? null
     setUsers((current) =>
       current.map((item) =>
         item.id === userId
@@ -4053,12 +4133,41 @@ function App() {
               isActive: !item.isActive,
             }
           : item,
-      ),
+        ),
     )
+    if (currentSessionActor && targetUser) {
+      appendAuditLog({
+        companyId: targetUser.companyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Usuarios',
+        action: 'Status',
+        targetType: 'Usuario',
+        targetLabel: targetUser.username,
+        severity: 'warning',
+        impactSummary: `Usuario ${targetUser.isActive ? 'inativado' : 'ativado'}.`,
+        relatedCompanyIds: [targetUser.companyId],
+      })
+    }
   }
 
   function deleteUser(userId: number) {
+    const targetUser = users.find((item) => item.id === userId) ?? null
     setUsers((current) => current.filter((item) => item.id !== userId))
+    if (currentSessionActor && targetUser) {
+      appendAuditLog({
+        companyId: targetUser.companyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Usuarios',
+        action: 'Exclusao',
+        targetType: 'Usuario',
+        targetLabel: targetUser.username,
+        severity: 'critical',
+        impactSummary: 'Login removido do sistema.',
+        relatedCompanyIds: [targetUser.companyId],
+      })
+    }
     if (editingUserId === userId) {
       setUserForm(emptyUserForm)
       setUserSectorInput('')
@@ -4067,47 +4176,11 @@ function App() {
   }
 
   function toggleCollaboratorFunction(functionName: string) {
-    setCollaboratorForm((current) => {
-      const exists = current.functions.includes(functionName)
-      if (exists) {
-        const nextFunctions = current.functions.filter((item) => item !== functionName)
-        return {
-          ...current,
-          functions: nextFunctions,
-          primaryFunction:
-            current.primaryFunction === functionName
-              ? nextFunctions[0] ?? ''
-              : current.primaryFunction,
-        }
-      }
-
-      const nextFunctions =
-        current.employmentType === 'EXTRA'
-          ? [...current.functions, functionName].slice(0, 6)
-          : [functionName]
-
-      return {
-        ...current,
-        functions: nextFunctions,
-        primaryFunction:
-          current.primaryFunction && nextFunctions.includes(current.primaryFunction)
-            ? current.primaryFunction
-            : nextFunctions[0] ?? '',
-      }
-    })
+    setCollaboratorForm((current) => toggleCollaboratorFunctionSelection(current, functionName))
   }
 
   function changeCollaboratorEmploymentType(employmentType: CollaboratorEmploymentType) {
-    setCollaboratorForm((current) => ({
-      ...current,
-      employmentType,
-      functions:
-        employmentType === 'EXTRA' ? current.functions.slice(0, 6) : current.functions.slice(0, 1),
-      primaryFunction:
-        employmentType === 'EXTRA'
-          ? current.primaryFunction
-          : current.functions.slice(0, 1)[0] ?? current.primaryFunction,
-    }))
+    setCollaboratorForm((current) => changeCollaboratorEmploymentTypeState(current, employmentType))
   }
 
   function toggleCollaboratorActivation(collaboratorId: number) {
@@ -4150,16 +4223,9 @@ function App() {
     const targetProfile =
       collaboratorProfiles.find((profile) => profile.cpf.replace(/\D/g, '') === targetCollaborator.cpf.replace(/\D/g, '')) ?? null
 
-    setCollaboratorForm({
-      cpf: targetCollaborator.cpf,
-      fullName: targetProfile?.fullName ?? '',
-      pixKey: targetProfile?.pixKey ?? '',
-      contact: targetProfile?.contact ?? '',
-      employmentType: targetCollaborator.employmentType,
-      functions: targetCollaborator.functions,
-      primaryFunction: targetCollaborator.primaryFunction,
-    })
-    setCollaboratorLookupFeedback('Cadastro carregado para edicao.')
+    const nextState = buildCollaboratorEditState(targetCollaborator, targetProfile)
+    setCollaboratorForm(nextState.collaboratorForm)
+    setCollaboratorLookupFeedback(nextState.collaboratorLookupFeedback)
   }
 
   function deleteCollaborator(collaboratorId: number) {
@@ -4179,12 +4245,10 @@ function App() {
   }
 
   function openFunctionModal(prefillName = '') {
-    setFunctionSuggestion(prefillName)
-    setFunctionForm((current) => ({
-      ...current,
-      name: prefillName || current.name,
-    }))
-    setIsFunctionModalOpen(true)
+    const nextState = buildFunctionModalOpenState(functionForm, prefillName)
+    setFunctionSuggestion(nextState.functionSuggestion)
+    setFunctionForm(nextState.functionForm)
+    setIsFunctionModalOpen(nextState.isFunctionModalOpen)
   }
 
   function editFunction(functionId: number) {
@@ -4193,15 +4257,9 @@ function App() {
       return
     }
 
+    const nextState = buildFunctionEditState(targetFunction)
     setEditingFunctionId(functionId)
-    setFunctionForm({
-      name: targetFunction.name,
-      sector: targetFunction.sector,
-      description: targetFunction.description,
-      baseSalary: targetFunction.baseSalary,
-      serviceQuota: targetFunction.serviceQuota,
-      extraPayValue: targetFunction.extraPayValue,
-    })
+    setFunctionForm(nextState.functionForm)
   }
 
   function toggleFunctionActivation(functionId: number) {
@@ -4237,21 +4295,7 @@ function App() {
     }
 
     setFunctions((current) => current.filter((item) => item.id !== functionId))
-    setCollaborators((current) =>
-      current.map((item) => {
-        if (item.companyId !== targetFunction.companyId || !item.functions.includes(targetFunction.name)) {
-          return item
-        }
-
-        const nextFunctions = item.functions.filter((functionName) => functionName !== targetFunction.name)
-        return {
-          ...item,
-          functions: nextFunctions,
-          primaryFunction:
-            item.primaryFunction === targetFunction.name ? nextFunctions[0] ?? '' : item.primaryFunction,
-        }
-      }),
-    )
+    setCollaborators((current) => removeFunctionFromCollaborators(current, targetFunction))
 
     if (editingFunctionId === functionId) {
       setFunctionForm(emptyFunctionForm)
@@ -4274,36 +4318,31 @@ function App() {
           ) ?? null
 
     if (!existingProfile) {
-      setCollaboratorForm((current) => ({
-        ...current,
-        cpf: formattedCpf,
-        fullName: current.cpf === formattedCpf ? current.fullName : '',
-        contact: current.cpf === formattedCpf ? current.contact : '',
-        pixKey: current.cpf === formattedCpf ? current.pixKey : '',
-        functions: current.cpf === formattedCpf ? current.functions : [],
-        primaryFunction: current.cpf === formattedCpf ? current.primaryFunction : '',
-      }))
+      setCollaboratorForm((current) =>
+        buildCollaboratorCpfMissingProfileState(current, formattedCpf, cpfDigits.length).collaboratorForm,
+      )
       setCollaboratorLookupFeedback(
-        cpfDigits.length === 11 ? 'CPF nao encontrado em outras empresas. Cadastre os dados deste colaborador.' : '',
+        buildCollaboratorCpfMissingProfileState(collaboratorForm, formattedCpf, cpfDigits.length).collaboratorLookupFeedback,
       )
       return
     }
 
-    setCollaboratorForm((current) => ({
-      ...current,
-      cpf: formattedCpf,
-      fullName: existingProfile.fullName,
-      contact: existingProfile.contact,
-      pixKey: existingProfile.pixKey,
-      functions: existingCompanyCollaborator?.functions ?? current.functions,
-      primaryFunction: existingCompanyCollaborator?.primaryFunction ?? current.primaryFunction,
-      employmentType: existingCompanyCollaborator?.employmentType ?? current.employmentType,
-    }))
+    setCollaboratorForm((current) =>
+      buildCollaboratorCpfLookupState(
+        current,
+        formattedCpf,
+        existingProfile,
+        existingCompanyCollaborator,
+      ).collaboratorForm,
+    )
 
     setCollaboratorLookupFeedback(
-      existingCompanyCollaborator
-        ? 'Este colaborador ja possui cadastro nesta empresa. Os dados globais foram carregados.'
-        : 'Colaborador localizado por CPF em outra empresa. Dados basicos carregados automaticamente.',
+      buildCollaboratorCpfLookupState(
+        collaboratorForm,
+        formattedCpf,
+        existingProfile,
+        existingCompanyCollaborator,
+      ).collaboratorLookupFeedback,
     )
   }
 
@@ -4316,17 +4355,77 @@ function App() {
   }
 
   function openCollaboratorModal(source: CollaboratorModalSource) {
-    setCollaboratorModalSource(source)
-    setCollaboratorLookupFeedback('')
-    setCollaboratorForm(
-      source === 'user'
-        ? {
-            ...emptyCollaboratorForm,
-            fullName: userForm.fullName,
-          }
-        : emptyCollaboratorForm,
+    const nextState = buildCollaboratorModalOpenState(source, emptyCollaboratorForm, userForm.fullName)
+    setCollaboratorModalSource(nextState.collaboratorModalSource)
+    setCollaboratorLookupFeedback(nextState.collaboratorLookupFeedback)
+    setCollaboratorForm(nextState.collaboratorForm)
+    setIsCollaboratorModalOpen(nextState.isCollaboratorModalOpen)
+  }
+
+  function closeFunctionModal(force = false) {
+    if (!force && !confirmDiscardChanges()) {
+      return
+    }
+
+    const nextState = buildFunctionModalClosedState(emptyFunctionForm)
+    setFunctionForm(nextState.functionForm)
+    setEditingFunctionId(nextState.editingFunctionId)
+    setFunctionSuggestion(nextState.functionSuggestion)
+    setIsFunctionModalOpen(nextState.isFunctionModalOpen)
+  }
+
+  function closeCompanyModal(force = false) {
+    if (!force && !confirmDiscardChanges()) {
+      return
+    }
+
+    const nextState = buildCompanyModalClosedState()
+    setCompanyAgreementFeedback(nextState.companyAgreementFeedback)
+    setIsCompanyModalOpen(nextState.isCompanyModalOpen)
+  }
+
+  function closeCollaboratorModal(force = false) {
+    if (!force && !confirmDiscardChanges()) {
+      return
+    }
+
+    const nextState = buildCollaboratorModalClosedState(emptyCollaboratorForm)
+    setCollaboratorForm(nextState.collaboratorForm)
+    setCollaboratorLookupFeedback(nextState.collaboratorLookupFeedback)
+    setIsCollaboratorModalOpen(nextState.isCollaboratorModalOpen)
+  }
+
+  function appendAuditLog(entry: Omit<AuditLogRecord, 'id' | 'createdAt'>) {
+    setAuditLogs((current) =>
+      normalizeAuditLogs([
+        {
+          ...entry,
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          createdAt: new Date().toISOString(),
+        },
+        ...current,
+      ]),
     )
-    setIsCollaboratorModalOpen(true)
+  }
+
+  async function fetchModuleCollection<T>(moduleKey: ModularStateKey) {
+    const response = await fetch(`${apiBaseUrl}/${moduleKey}`)
+    if (!response.ok) {
+      throw new Error(`module-${moduleKey}-unavailable`)
+    }
+
+    const payload = (await response.json()) as { items: T[] }
+    return payload.items
+  }
+
+  async function persistModuleCollection<T>(moduleKey: ModularStateKey, items: T[]) {
+    await fetch(`${apiBaseUrl}/${moduleKey}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items }),
+    })
   }
 
   function buildAppStateSnapshot(): AppStateSnapshot {
@@ -4343,6 +4442,7 @@ function App() {
       scaleComments,
       scaleExtraRoster,
       users,
+      auditLogs,
     }
   }
 
@@ -4359,6 +4459,7 @@ function App() {
     setScaleComments(normalizedState.scaleComments)
     setScaleExtraRoster(normalizedState.scaleExtraRoster)
     setUsers(normalizedState.users)
+    setAuditLogs(normalizedState.auditLogs)
   }
 
   useEffect(() => {
@@ -4381,6 +4482,82 @@ function App() {
         if (payload.state) {
           skipNextRemoteSyncRef.current = true
           applyAppStateSnapshot(payload.state)
+          skipNextModuleSyncRef.current = {
+            agreements: true,
+            sectors: true,
+            functions: true,
+            collaboratorProfiles: true,
+            collaborators: true,
+            schedules: true,
+            scaleAssignments: true,
+            scaleComments: true,
+            scaleExtraRoster: true,
+            users: true,
+            auditLogs: true,
+          }
+          const [
+            remoteAgreements,
+            remoteSectors,
+            remoteFunctions,
+            remoteCollaboratorProfiles,
+            remoteCollaborators,
+            remoteSchedules,
+            remoteScaleAssignments,
+            remoteScaleComments,
+            remoteScaleExtraRoster,
+            remoteUsers,
+            remoteAuditLogs,
+          ] = await Promise.all([
+            fetchModuleCollection<CollectiveAgreementRecord>('agreements'),
+            fetchModuleCollection<SectorRecord>('sectors'),
+            fetchModuleCollection<FunctionRecord>('functions'),
+            fetchModuleCollection<CollaboratorProfileRecord>('collaboratorProfiles'),
+            fetchModuleCollection<CollaboratorRecord>('collaborators'),
+            fetchModuleCollection<ScheduleRecord>('schedules'),
+            fetchModuleCollection<ScaleAssignmentRecord>('scaleAssignments'),
+            fetchModuleCollection<ScaleCommentThreadRecord>('scaleComments'),
+            fetchModuleCollection<ScaleExtraRosterRecord>('scaleExtraRoster'),
+            fetchModuleCollection<CompanyUserRecord>('users'),
+            fetchModuleCollection<AuditLogRecord>('auditLogs'),
+          ])
+          if (!cancelled) {
+            setAgreements(mergeSeedAgreements(remoteAgreements))
+            setSectors(remoteSectors)
+            setFunctions(
+              remoteFunctions.map((item) => ({
+                ...item,
+                isActive: item.isActive ?? true,
+                inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive),
+              })),
+            )
+            setCollaboratorProfiles(remoteCollaboratorProfiles)
+            setCollaborators(
+              remoteCollaborators.map((item) => ({
+                ...item,
+                inactiveSince: item.inactiveSince ?? null,
+                inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive, item.inactiveSince),
+              })),
+            )
+            setSchedules(
+              remoteSchedules.map((item) => ({
+                ...item,
+                inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive),
+              })),
+            )
+            setScaleAssignments(remoteScaleAssignments)
+            setScaleComments(normalizeScaleCommentThreads(remoteScaleComments))
+            setScaleExtraRoster(remoteScaleExtraRoster)
+            setUsers(
+              remoteUsers.map((item) => ({
+                ...item,
+                sectors: item.sectors && item.sectors.length > 0 ? item.sectors : [],
+                sectionAccess: normalizeSectionAccess(item.role, item.sectionAccess),
+                linkedCollaboratorId: item.linkedCollaboratorId ?? null,
+                isActive: item.isActive ?? true,
+              })),
+            )
+            setAuditLogs(normalizeAuditLogs(remoteAuditLogs))
+          }
         }
       } catch {
         if (!cancelled) {
@@ -4509,64 +4686,256 @@ function App() {
   }, [agreements])
 
   useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.agreements) {
+      skipNextModuleSyncRef.current.agreements = false
+      return
+    }
+
+    void persistModuleCollection('agreements', agreements).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [agreements, isPersistenceReady, persistenceMode])
+
+  useEffect(() => {
     writeStoredValue(storageKeys.sectors, sectors)
   }, [sectors])
+
+  useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.sectors) {
+      skipNextModuleSyncRef.current.sectors = false
+      return
+    }
+
+    void persistModuleCollection('sectors', sectors).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [isPersistenceReady, persistenceMode, sectors])
 
   useEffect(() => {
     writeStoredValue(storageKeys.functions, functions)
   }, [functions])
 
   useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.functions) {
+      skipNextModuleSyncRef.current.functions = false
+      return
+    }
+
+    void persistModuleCollection('functions', functions).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [functions, isPersistenceReady, persistenceMode])
+
+  useEffect(() => {
     writeStoredValue(storageKeys.collaboratorProfiles, collaboratorProfiles)
   }, [collaboratorProfiles])
+
+  useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.collaboratorProfiles) {
+      skipNextModuleSyncRef.current.collaboratorProfiles = false
+      return
+    }
+
+    void persistModuleCollection('collaboratorProfiles', collaboratorProfiles).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [collaboratorProfiles, isPersistenceReady, persistenceMode])
 
   useEffect(() => {
     writeStoredValue(storageKeys.collaborators, collaborators)
   }, [collaborators])
 
   useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.collaborators) {
+      skipNextModuleSyncRef.current.collaborators = false
+      return
+    }
+
+    void persistModuleCollection('collaborators', collaborators).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [collaborators, isPersistenceReady, persistenceMode])
+
+  useEffect(() => {
     writeStoredValue(storageKeys.schedules, schedules)
   }, [schedules])
+
+  useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.schedules) {
+      skipNextModuleSyncRef.current.schedules = false
+      return
+    }
+
+    void persistModuleCollection('schedules', schedules).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [isPersistenceReady, persistenceMode, schedules])
 
   useEffect(() => {
     writeStoredValue(storageKeys.scaleAssignments, scaleAssignments)
   }, [scaleAssignments])
 
   useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.scaleAssignments) {
+      skipNextModuleSyncRef.current.scaleAssignments = false
+      return
+    }
+
+    void persistModuleCollection('scaleAssignments', scaleAssignments).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [isPersistenceReady, persistenceMode, scaleAssignments])
+
+  useEffect(() => {
     writeStoredValue(storageKeys.scaleComments, scaleComments)
   }, [scaleComments])
+
+  useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.scaleComments) {
+      skipNextModuleSyncRef.current.scaleComments = false
+      return
+    }
+
+    void persistModuleCollection('scaleComments', scaleComments).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [isPersistenceReady, persistenceMode, scaleComments])
 
   useEffect(() => {
     writeStoredValue(storageKeys.scaleExtraRoster, scaleExtraRoster)
   }, [scaleExtraRoster])
 
   useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.scaleExtraRoster) {
+      skipNextModuleSyncRef.current.scaleExtraRoster = false
+      return
+    }
+
+    void persistModuleCollection('scaleExtraRoster', scaleExtraRoster).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [isPersistenceReady, persistenceMode, scaleExtraRoster])
+
+  useEffect(() => {
     writeStoredValue(storageKeys.users, users)
   }, [users])
+
+  useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.users) {
+      skipNextModuleSyncRef.current.users = false
+      return
+    }
+
+    void persistModuleCollection('users', users).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [isPersistenceReady, persistenceMode, users])
+
+  useEffect(() => {
+    writeStoredValue(storageKeys.auditLogs, auditLogs)
+  }, [auditLogs])
+
+  useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.auditLogs) {
+      skipNextModuleSyncRef.current.auditLogs = false
+      return
+    }
+
+    void persistModuleCollection('auditLogs', auditLogs).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [auditLogs, isPersistenceReady, persistenceMode])
 
   useEffect(() => {
     if (session?.kind !== 'companyUser') {
       return
     }
 
-    const refreshedUser = users.find((item) => item.id === session.user.id)
-    if (!refreshedUser) {
+    const refreshedMemberships = getCompanyUserMembershipsForUser(users, session.user).filter((item) => {
+      const company = companies.find((companyItem) => companyItem.id === item.companyId)
+      return company?.status === 'ATIVA'
+    })
+
+    if (refreshedMemberships.length === 0) {
       setSession(null)
+      setCurrentCompanyId(null)
+      return
+    }
+
+    const nextActiveUser =
+      currentCompanyId === null
+        ? refreshedMemberships.find((item) => item.id === session.user.id) ?? refreshedMemberships[0]
+        : refreshedMemberships.find((item) => item.companyId === currentCompanyId) ?? refreshedMemberships[0]
+
+    if (!nextActiveUser) {
+      setSession(null)
+      setCurrentCompanyId(null)
       return
     }
 
     if (
-      refreshedUser.fullName !== session.user.fullName ||
-      refreshedUser.username !== session.user.username ||
-      refreshedUser.password !== session.user.password ||
-      refreshedUser.role !== session.user.role ||
-      refreshedUser.isActive !== session.user.isActive ||
-      refreshedUser.linkedCollaboratorId !== session.user.linkedCollaboratorId ||
-      refreshedUser.sectors.join('|') !== session.user.sectors.join('|')
+      !areMembershipListsEqual(session.memberships, refreshedMemberships) ||
+      nextActiveUser.id !== session.user.id
     ) {
-      setSession({ kind: 'companyUser', user: refreshedUser })
+      setSession({
+        kind: 'companyUser',
+        user: nextActiveUser,
+        memberships: refreshedMemberships,
+      })
     }
-  }, [session, users])
+
+    if (currentCompanyId !== null && nextActiveUser.companyId !== currentCompanyId) {
+      const nextCompany = companies.find((item) => item.id === nextActiveUser.companyId) ?? null
+      setCurrentCompanyId(nextActiveUser.companyId)
+      if (nextCompany) {
+        populateCompanyForm(nextCompany)
+      }
+    }
+  }, [companies, currentCompanyId, session, users])
 
   useEffect(() => {
     if (companyAgreementSuggestion && !companyForm.collectiveAgreementId) {
@@ -4578,10 +4947,15 @@ function App() {
   }, [companyAgreementSuggestion, companyForm.collectiveAgreementId])
 
   useEffect(() => {
-    if (!visibleAppSections.includes(activeSection)) {
+    if (activeSection === 'PainelMaster' && !isSystemAdmin) {
+      setActiveSection(visibleAppSections[0] ?? 'Escala')
+      return
+    }
+
+    if (activeSection !== 'PainelMaster' && !visibleAppSections.includes(activeSection)) {
       setActiveSection(visibleAppSections[0] ?? 'Escala')
     }
-  }, [activeSection, visibleAppSections])
+  }, [activeSection, isSystemAdmin, visibleAppSections])
 
   useEffect(() => {
     if (!openReportColumnMenu) {
@@ -4795,6 +5169,42 @@ function App() {
     )
   }
 
+  if (session?.kind === 'companyUser' && currentCompanyId === null) {
+    return (
+      <div className="auth-shell">
+        <section className="auth-card selector-card">
+          <div className="selector-header">
+            <div>
+              <p className="eyebrow">{session.user.role}</p>
+              <h1 className="selector-title">Selecione a empresa</h1>
+            </div>
+            <button type="button" className="ghost-button" onClick={logout}>
+              Sair
+            </button>
+          </div>
+
+          <div className="selector-list">
+            {currentCompanyMembershipCompanies.map((company) => {
+              const membership = currentCompanyUserMemberships.find((item) => item.companyId === company.id) ?? null
+              return (
+                <article key={company.id} className="selector-item">
+                  <button type="button" className="selector-main" onClick={() => switchCompany(company.id)}>
+                    <strong>{company.tradeName}</strong>
+                    <span>
+                      {company.city}/{company.state}
+                    </span>
+                    <span>{membership ? membership.role : session.user.role}</span>
+                    <span>{company.cnpj || 'CNPJ nao informado'}</span>
+                  </button>
+                </article>
+              )
+            })}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
   if (isSystemAdmin && currentCompanyId === null) {
     return (
       <div className="auth-shell">
@@ -4856,7 +5266,7 @@ function App() {
         </section>
 
         {isCompanyModalOpen && (
-          <div className="modal-backdrop" role="presentation" onClick={() => setIsCompanyModalOpen(false)}>
+          <div className="modal-backdrop" role="presentation" onClick={() => closeCompanyModal()}>
             <section
               className="modal-card"
               role="dialog"
@@ -4869,7 +5279,7 @@ function App() {
                   <p className="eyebrow">Nova empresa</p>
                   <h2 id="company-modal-title">Cadastro de empresa</h2>
                 </div>
-                <button type="button" className="ghost-button" onClick={() => setIsCompanyModalOpen(false)}>
+                <button type="button" className="ghost-button" onClick={() => closeCompanyModal()}>
                   Fechar
                 </button>
               </div>
@@ -4978,12 +5388,21 @@ function App() {
           </div>
 
           <nav className="sidebar-nav" aria-label="Navegacao principal">
+            {isSystemAdmin ? (
+              <button
+                type="button"
+                className={activeSection === 'PainelMaster' ? 'nav-item active' : 'nav-item'}
+                onClick={() => handleSectionSelection('PainelMaster')}
+              >
+                Painel master
+              </button>
+            ) : null}
             {visibleAppSections.map((section) => (
               <button
                 key={section}
                 type="button"
                 className={section === activeSection ? 'nav-item active' : 'nav-item'}
-                onClick={() => setActiveSection(section)}
+                onClick={() => handleSectionSelection(section)}
               >
                 {section}
               </button>
@@ -5015,11 +5434,144 @@ function App() {
               <button type="button" className="secondary-button" onClick={() => setCurrentCompanyId(null)}>
                 Trocar empresa
               </button>
+            ) : currentCompanyUserMemberships.length > 1 ? (
+              <button type="button" className="secondary-button" onClick={() => setCurrentCompanyId(null)}>
+                Trocar empresa
+              </button>
             ) : null}
           </div>
         </section>
 
-        {activeSection === 'Painel' && (
+        {activeSection === 'PainelMaster' && isSystemAdmin && currentCompany && (
+          <>
+            <section className="section-card">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow">Administrador do sistema</p>
+                  <h2>Painel master</h2>
+                </div>
+                <div className="selector-row">
+                  {masterPanelSections.map((section) => (
+                    <button
+                      key={section}
+                      type="button"
+                      className={activeMasterPanelSection === section ? 'primary-button' : 'secondary-button'}
+                      onClick={() => setActiveMasterPanelSection(section)}
+                    >
+                      {section}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="panel-grid">
+                <article className="metric-card">
+                  <p>Eventos da empresa ativa</p>
+                  <strong>{currentCompanyAuditLogs.length}</strong>
+                </article>
+                <article className="metric-card">
+                  <p>Alertas recentes</p>
+                  <strong>{auditAlertLogs.length}</strong>
+                </article>
+                <article className="metric-card">
+                  <p>Impactos monitorados</p>
+                  <strong>{auditImpactLogs.length}</strong>
+                </article>
+              </div>
+            </section>
+
+            <section className="section-card">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow">{currentCompany.tradeName}</p>
+                  <h3>
+                    {activeMasterPanelSection === 'Auditoria'
+                      ? 'Trilha de auditoria'
+                      : activeMasterPanelSection === 'Alertas'
+                        ? 'Alertas'
+                        : 'Impactos'}
+                  </h3>
+                </div>
+              </div>
+
+              <div className="selector-row">
+                <label className="form-field">
+                  <span>Buscar</span>
+                  <input
+                    value={masterPanelSearch}
+                    onChange={(event) => setMasterPanelSearch(event.target.value)}
+                    placeholder="acao, ator, alvo ou impacto"
+                  />
+                </label>
+                <label className="form-field">
+                  <span>Severidade</span>
+                  <select
+                    value={masterPanelSeverityFilter}
+                    onChange={(event) =>
+                      setMasterPanelSeverityFilter(
+                        event.target.value as 'Todas' | 'info' | 'warning' | 'critical',
+                      )
+                    }
+                  >
+                    <option value="Todas">Todas</option>
+                    <option value="info">Info</option>
+                    <option value="warning">Warning</option>
+                    <option value="critical">Critical</option>
+                  </select>
+                </label>
+                <label className="form-field">
+                  <span>Modulo</span>
+                  <select
+                    value={masterPanelModuleFilter}
+                    onChange={(event) => setMasterPanelModuleFilter(event.target.value)}
+                  >
+                    {masterPanelModuleOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="table-list">
+                {activeMasterPanelLogs.map((item) => (
+                  <article key={item.id} className="list-row">
+                    <div className="user-row-header">
+                      <div className="user-title-group">
+                        <strong>{item.action}</strong>
+                        <span
+                          className={
+                            item.severity === 'critical'
+                              ? 'status-pill status-inactive'
+                              : item.severity === 'warning'
+                                ? 'status-pill'
+                                : 'status-pill status-active'
+                          }
+                        >
+                          {item.severity}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="row-meta user-row-meta">
+                      <span><strong className="meta-label">Modulo:</strong> {item.module}</span>
+                      <span><strong className="meta-label">Alvo:</strong> {item.targetLabel}</span>
+                      <span><strong className="meta-label">Ator:</strong> {item.actorName} • {item.actorRole}</span>
+                      <span><strong className="meta-label">Impacto:</strong> {item.impactSummary}</span>
+                      <span><strong className="meta-label">Quando:</strong> {formatDateTimeLabel(item.createdAt)}</span>
+                    </div>
+                  </article>
+                ))}
+
+                {activeMasterPanelLogs.length === 0 ? (
+                  <p className="section-note">Nenhum evento corresponde aos filtros da empresa ativa.</p>
+                ) : null}
+              </div>
+            </section>
+          </>
+        )}
+
+        {activeSection === 'Painel' && effectiveSectionAccess.Painel && (
           <>
             <section className="panel-grid">
               {dashboardMetrics.map((metric) => (
@@ -5354,7 +5906,7 @@ function App() {
           </>
         )}
 
-        {activeSection === 'Empresa' && currentCompany && (
+        {activeSection === 'Empresa' && currentCompany && effectiveSectionAccess.Empresa && (
           <section className="section-card">
             <div className="section-header">
               <div>
@@ -5500,6 +6052,61 @@ function App() {
                   <option value="regramento-especifico">Empresa habilitada no regramento especifico</option>
                 </select>
               </label>
+              <label>
+                Visualizacao padrao da escala
+                <select
+                  value={currentCompany.defaultScaleViewMode ?? 'week'}
+                  onChange={(event) =>
+                    updateCompanyOperationalSettings(currentCompany.id, {
+                      defaultScaleViewMode: event.target.value as ScaleViewMode,
+                    })
+                  }
+                >
+                  <option value="week">Semanal</option>
+                  <option value="month">Mensal</option>
+                </select>
+              </label>
+              <label>
+                Relatorio padrao
+                <select
+                  value={currentCompany.defaultReportId ?? 'scale-consolidated'}
+                  onChange={(event) =>
+                    updateCompanyOperationalSettings(currentCompany.id, {
+                      defaultReportId: event.target.value as ReportId,
+                    })
+                  }
+                >
+                  {reportOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field-span print-option-row">
+                <span>Permitir edicao da escala em datas passadas</span>
+                <input
+                  type="checkbox"
+                  checked={currentCompany.allowPastScaleEdits ?? false}
+                  onChange={(event) =>
+                    updateCompanyOperationalSettings(currentCompany.id, {
+                      allowPastScaleEdits: event.target.checked,
+                    })
+                  }
+                />
+              </label>
+              <label className="field-span print-option-row">
+                <span>Incluir extras por padrao na impressao</span>
+                <input
+                  type="checkbox"
+                  checked={currentCompany.defaultPrintIncludeExtras ?? false}
+                  onChange={(event) =>
+                    updateCompanyOperationalSettings(currentCompany.id, {
+                      defaultPrintIncludeExtras: event.target.checked,
+                    })
+                  }
+                />
+              </label>
               <div className="form-actions">
                 <button type="submit" className="primary-button">
                   Atualizar empresa
@@ -5509,7 +6116,7 @@ function App() {
           </section>
         )}
 
-        {activeSection === 'Convencoes' && canManageData && (
+        {activeSection === 'Convencoes' && canManageData && effectiveSectionAccess.Convencoes && (
           <section className="section-card">
             <div className="section-header">
               <div>
@@ -5794,7 +6401,7 @@ function App() {
           </section>
         )}
 
-        {activeSection === 'Colaboradores' && canManageData && (
+        {activeSection === 'Colaboradores' && canManageData && effectiveSectionAccess.Colaboradores && (
           <section className="section-card">
             <div className="section-header">
               <div>
@@ -5994,7 +6601,7 @@ function App() {
           </section>
         )}
 
-        {activeSection === 'Funcoes' && canManageData && (
+        {activeSection === 'Funcoes' && canManageData && effectiveSectionAccess.Funcoes && (
           <section className="section-card">
             <div className="section-header">
               <div>
@@ -6129,7 +6736,7 @@ function App() {
           </section>
         )}
 
-        {activeSection === 'Horarios' && canManageData && (
+        {activeSection === 'Horarios' && canManageData && effectiveSectionAccess.Horarios && (
           <section className="section-card">
             <div className="section-header">
               <div>
@@ -6457,7 +7064,7 @@ function App() {
           </section>
         )}
 
-        {activeSection === 'Escala' && currentCompany && (
+        {activeSection === 'Escala' && currentCompany && effectiveSectionAccess.Escala && (
           <section
             className={
               printIncludeExtras
@@ -6913,7 +7520,9 @@ function App() {
                                                                           disabled={
                                                                             !canEditScale ||
                                                                             !collaboratorActiveOnDate ||
-                                                                            (!isSystemAdmin && entry.date < todayIso) ||
+                                                                            (!isSystemAdmin &&
+                                                                              !currentCompany?.allowPastScaleEdits &&
+                                                                              entry.date < todayIso) ||
                                                                             (scaleViewMode === 'month' &&
                                                                               entry.date.slice(0, 7) !== monthReference)
                                                                           }
@@ -7018,7 +7627,9 @@ function App() {
                                                                         disabled={
                                                                           !canEditScale ||
                                                                           !collaboratorActiveOnDate ||
-                                                                          (!isSystemAdmin && entry.date < todayIso) ||
+                                                                          (!isSystemAdmin &&
+                                                                            !currentCompany?.allowPastScaleEdits &&
+                                                                            entry.date < todayIso) ||
                                                                           (scaleViewMode === 'month' &&
                                                                             entry.date.slice(0, 7) !== monthReference)
                                                                         }
@@ -7179,7 +7790,7 @@ function App() {
           </section>
         )}
 
-        {activeSection === 'Usuarios' && canManageData && (
+        {activeSection === 'Usuarios' && canManageData && effectiveSectionAccess.Usuarios && (
           <section className="section-card">
             <div className="section-header">
               <div>
@@ -7187,7 +7798,7 @@ function App() {
                 <h2>Usuarios</h2>
               </div>
               <p className="section-note">
-                Os logins cadastrados aqui acessam automaticamente apenas {currentCompany?.tradeName}.
+                Os logins cadastrados aqui podem ficar restritos a {currentCompany?.tradeName} ou ser vinculados a outras empresas ativas do grupo.
               </p>
             </div>
 
@@ -7269,8 +7880,11 @@ function App() {
                     setUserForm({
                       ...userForm,
                       role: event.target.value as CompanyRole,
+                      sectionAccess: buildDefaultSectionAccessByRole(event.target.value as CompanyRole),
                       linkedCollaboratorId:
                         event.target.value === 'Visualizador' ? userForm.linkedCollaboratorId : '',
+                      additionalCompanyIds:
+                        event.target.value === 'Visualizador' ? [] : userForm.additionalCompanyIds,
                     })
                   }
                 >
@@ -7281,6 +7895,62 @@ function App() {
                   ))}
                 </select>
               </label>
+
+              {isSystemAdmin ? (
+                <div className="field-span">
+                  <div className="field-heading">
+                    <span className="field-title">Empresas adicionais para este login</span>
+                    <span className="field-helper">
+                      O mesmo usuario podera escolher a empresa ativa no login. Para outras empresas, o sistema libera todos os setores ja cadastrados nelas. Esse atalho nao se aplica a visualizador.
+                    </span>
+                  </div>
+
+                  {additionalUserCompanyOptions.length > 0 ? (
+                    <div className="selector-grid">
+                      {additionalUserCompanyOptions.map((company) => (
+                        <label key={company.id} className="checkbox-card">
+                          <input
+                            type="checkbox"
+                            checked={userForm.additionalCompanyIds.includes(String(company.id))}
+                            disabled={userForm.role === 'Visualizador'}
+                            onChange={() => toggleUserAdditionalCompany(String(company.id))}
+                          />
+                          <span>{company.tradeName}</span>
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="field-helper">Nao ha outras empresas ativas disponiveis.</div>
+                  )}
+                </div>
+              ) : null}
+
+              <div className="field-span">
+                <div className="field-heading">
+                  <span className="field-title">Acessos por modulo</span>
+                  <span className="field-helper">
+                    O papel define uma base inicial, mas voce pode ajustar os modulos liberados para este usuario nesta empresa.
+                  </span>
+                </div>
+
+                <div className="selector-grid">
+                  {appSections.map((section) => {
+                    const checked = normalizeSectionAccess(userForm.role, userForm.sectionAccess)[section]
+                    const isLocked = section === 'Escala'
+                    return (
+                      <label key={section} className="checkbox-card">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={isLocked}
+                          onChange={() => toggleUserSectionAccess(section)}
+                        />
+                        <span>{section}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
 
               {userForm.role === 'Visualizador' ? (
                 <div className="field-span">
@@ -7435,6 +8105,20 @@ function App() {
                     </div>
                   </div>
                   <div className="row-meta user-row-meta">
+                    {(() => {
+                      const relatedCompanies = getCompanyUserMembershipsForUser(users, item)
+                        .filter((membership) => membership.companyId !== item.companyId)
+                        .map((membership) => companies.find((company) => company.id === membership.companyId)?.tradeName)
+                        .filter((companyName): companyName is string => !!companyName)
+
+                      return relatedCompanies.length > 0 ? (
+                        <div className="user-meta-line">
+                          <span>
+                            <strong className="meta-label">Outras empresas:</strong> {relatedCompanies.join(', ')}
+                          </span>
+                        </div>
+                      ) : null
+                    })()}
                     <div className="user-meta-line">
                       <span><strong className="meta-label">Login:</strong> {item.username}</span>
                       <div className="password-row">
@@ -7485,6 +8169,12 @@ function App() {
                         </button>
                       </div>
                       <span><strong className="meta-label">Setores:</strong> {item.sectors.join(', ')}</span>
+                      <span>
+                        <strong className="meta-label">Modulos:</strong>{' '}
+                        {appSections
+                          .filter((section) => normalizeSectionAccess(item.role, item.sectionAccess)[section])
+                          .join(', ')}
+                      </span>
                       <span><strong className="meta-label">Perfil:</strong> {item.role}</span>
                       {item.role === 'Visualizador' && linkedCollaboratorName ? (
                         <span><strong className="meta-label">Colaborador:</strong> {linkedCollaboratorName}</span>
@@ -7564,7 +8254,7 @@ function App() {
       )}
 
       {scaleCommentModal && (
-        <div className="modal-backdrop" role="presentation" onClick={closeScaleCommentModal}>
+        <div className="modal-backdrop" role="presentation" onClick={() => closeScaleCommentModal()}>
           <section
             className="modal-card scale-comment-modal"
             role="dialog"
@@ -7583,7 +8273,7 @@ function App() {
                 </h2>
                 <p className="section-note">{formatDateLabel(scaleCommentModal.date)}</p>
               </div>
-              <button type="button" className="ghost-button" onClick={closeScaleCommentModal}>
+              <button type="button" className="ghost-button" onClick={() => closeScaleCommentModal()}>
                 Fechar
               </button>
             </div>
@@ -7840,7 +8530,7 @@ function App() {
           role="presentation"
           onClick={() => {
             setCollaboratorModalSource('scale')
-            setIsCollaboratorModalOpen(false)
+            closeCollaboratorModal()
           }}
         >
           <section
@@ -7860,7 +8550,7 @@ function App() {
                 className="ghost-button"
                 onClick={() => {
                   setCollaboratorModalSource('scale')
-                  setIsCollaboratorModalOpen(false)
+                  closeCollaboratorModal()
                 }}
               >
                 Fechar
@@ -8005,7 +8695,7 @@ function App() {
       )}
 
       {isFunctionModalOpen && (
-        <div className="modal-backdrop" role="presentation" onClick={() => setIsFunctionModalOpen(false)}>
+        <div className="modal-backdrop" role="presentation" onClick={() => closeFunctionModal()}>
           <section
             className="modal-card"
             role="dialog"
@@ -8018,7 +8708,7 @@ function App() {
                 <p className="eyebrow">Cadastro rapido</p>
                 <h2 id="function-modal-title">Nova funcao</h2>
               </div>
-              <button type="button" className="ghost-button" onClick={() => setIsFunctionModalOpen(false)}>
+              <button type="button" className="ghost-button" onClick={() => closeFunctionModal()}>
                 Fechar
               </button>
             </div>
@@ -8099,7 +8789,7 @@ function App() {
       )}
 
       {isCompanyModalOpen && (
-        <div className="modal-backdrop" role="presentation" onClick={() => setIsCompanyModalOpen(false)}>
+        <div className="modal-backdrop" role="presentation" onClick={() => closeCompanyModal()}>
           <section
             className="modal-card"
             role="dialog"
@@ -8112,7 +8802,7 @@ function App() {
                 <p className="eyebrow">Nova empresa</p>
                 <h2 id="new-company-inline-title">Cadastro de empresa</h2>
               </div>
-              <button type="button" className="ghost-button" onClick={() => setIsCompanyModalOpen(false)}>
+              <button type="button" className="ghost-button" onClick={() => closeCompanyModal()}>
                 Fechar
               </button>
             </div>

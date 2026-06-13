@@ -4,29 +4,16 @@ const express = require('express')
 const cors = require('cors')
 const { PrismaClient } = require('@prisma/client')
 const { z } = require('zod')
+const { createStateStore } = require('./stateStore')
+const { registerStateRoutes } = require('./stateRoutes')
 
 loadEnvFile(path.join(__dirname, '.env'))
 
 const prisma = new PrismaClient()
+const stateStore = createStateStore(prisma)
 const app = express()
 const port = Number(process.env.PORT || 4000)
-const stateKey = 'default'
 const clientDistPath = path.resolve(__dirname, '..', 'dist')
-
-const appStateSchema = z.object({
-  version: z.number().int().min(1).default(1),
-  companies: z.array(z.unknown()).default([]),
-  agreements: z.array(z.unknown()).default([]),
-  sectors: z.array(z.unknown()).default([]),
-  functions: z.array(z.unknown()).default([]),
-  collaboratorProfiles: z.array(z.unknown()).default([]),
-  collaborators: z.array(z.unknown()).default([]),
-  schedules: z.array(z.unknown()).default([]),
-  scaleAssignments: z.array(z.unknown()).default([]),
-  scaleComments: z.array(z.unknown()).default([]),
-  scaleExtraRoster: z.array(z.unknown()).default([]),
-  users: z.array(z.unknown()).default([]),
-})
 
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
@@ -36,44 +23,7 @@ app.get('/api/health', async (_request, response) => {
   response.json({ ok: true })
 })
 
-app.get('/api/state', async (_request, response) => {
-  const stored = await prisma.appState.findUnique({ where: { key: stateKey } })
-
-  if (!stored) {
-    response.json({ state: null })
-    return
-  }
-
-  response.json({
-    state: {
-      version: stored.version,
-      ...JSON.parse(stored.payload),
-    },
-    updatedAt: stored.updatedAt,
-  })
-})
-
-app.put('/api/state', async (request, response) => {
-  const state = appStateSchema.parse(request.body)
-
-  const stored = await prisma.appState.upsert({
-    where: { key: stateKey },
-    update: {
-      version: state.version,
-      payload: JSON.stringify(stripVersion(state)),
-    },
-    create: {
-      key: stateKey,
-      version: state.version,
-      payload: JSON.stringify(stripVersion(state)),
-    },
-  })
-
-  response.json({
-    ok: true,
-    updatedAt: stored.updatedAt,
-  })
-})
+registerStateRoutes(app, stateStore)
 
 if (fs.existsSync(clientDistPath)) {
   app.use(express.static(clientDistPath))
@@ -104,11 +54,6 @@ app.use((error, _request, response, _next) => {
 app.listen(port, () => {
   console.log(`Escala Laboral API em http://localhost:${port}`)
 })
-
-function stripVersion(state) {
-  const { version, ...payload } = state
-  return payload
-}
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) {
