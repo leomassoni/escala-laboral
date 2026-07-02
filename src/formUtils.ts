@@ -11,19 +11,105 @@ export type SchedulePreviewInput = {
   endPeriod: TimePeriod
 }
 
-export function normalizeAbbreviation(value: string) {
-  const compact = value
+function normalizeAbbreviationSource(value: string) {
+  return value
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^A-Za-z0-9]/g, '')
+    .replace(/[^A-Za-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim()
     .toUpperCase()
+}
+
+export function normalizeAbbreviation(value: string) {
+  const compact = normalizeAbbreviationSource(value).replace(/\s+/g, '')
 
   if (compact.length >= 3) {
     return compact.slice(0, 3)
   }
 
   return (compact + 'XXX').slice(0, 3)
+}
+
+function buildAbbreviationCandidates(value: string) {
+  const normalized = normalizeAbbreviationSource(value)
+  const words = normalized.split(' ').filter(Boolean)
+  const compact = words.join('')
+  const candidates = new Set<string>()
+
+  if (words.length >= 3) {
+    candidates.add(words.slice(0, 3).map((word) => word[0]).join(''))
+  }
+
+  if (words.length >= 2) {
+    candidates.add(`${words[0][0]}${words[1].slice(0, 2)}`)
+    candidates.add(`${words[0].slice(0, 2)}${words[1][0]}`)
+    candidates.add(
+      `${words[0][0]}${words.slice(1).map((word) => word[0]).join('')}`.slice(0, 3),
+    )
+  }
+
+  if (words.length >= 1) {
+    candidates.add(words[0].slice(0, 3))
+  }
+
+  if (words.length >= 2) {
+    candidates.add(`${words[0].slice(0, 1)}${words[1].slice(0, 1)}${words[0].slice(1, 2)}`)
+    candidates.add(`${words[0].slice(0, 1)}${words[1].slice(0, 1)}${words[1].slice(1, 2)}`)
+  }
+
+  for (let index = 0; index <= Math.max(0, compact.length - 3); index += 1) {
+    candidates.add(compact.slice(index, index + 3))
+  }
+
+  const consonants = compact.replace(/[AEIOU]/g, '')
+  if (consonants.length >= 3) {
+    candidates.add(consonants.slice(0, 3))
+  }
+
+  return Array.from(candidates)
+    .map((candidate) => candidate.replace(/[^A-Z0-9]/g, '').slice(0, 3))
+    .filter((candidate) => candidate.length > 0)
+    .map((candidate) => candidate.padEnd(3, 'X'))
+}
+
+export function buildUniqueScheduleAbbreviation(
+  shiftName: string,
+  existingAbbreviations: string[],
+  currentAbbreviation?: string,
+) {
+  const blocked = new Set(
+    existingAbbreviations
+      .map((item) => item.trim().toUpperCase())
+      .filter((item) => item && item !== currentAbbreviation?.trim().toUpperCase()),
+  )
+
+  const candidates = buildAbbreviationCandidates(shiftName)
+
+  for (const candidate of candidates) {
+    if (!blocked.has(candidate)) {
+      return candidate
+    }
+  }
+
+  const fallbackBase = normalizeAbbreviation(shiftName).slice(0, 2)
+  for (let digit = 1; digit <= 9; digit += 1) {
+    const candidate = `${fallbackBase}${digit}`.slice(0, 3)
+    if (!blocked.has(candidate)) {
+      return candidate
+    }
+  }
+
+  for (let first = 65; first <= 90; first += 1) {
+    for (let second = 65; second <= 90; second += 1) {
+      const candidate = `${String.fromCharCode(first)}${String.fromCharCode(second)}X`
+      if (!blocked.has(candidate)) {
+        return candidate
+      }
+    }
+  }
+
+  return normalizeAbbreviation(shiftName)
 }
 
 export function formatCnpj(value: string) {
@@ -184,22 +270,34 @@ export function parseTime(value: string, period: TimePeriod) {
 
 export function buildSchedulePreview(values: SchedulePreviewInput) {
   const issues: string[] = []
-  const labels = [
+  ;([
     ['startTime', 'Horario de inicio'],
-    ['breakStart', 'Inicio de pausa'],
-    ['breakEnd', 'Fim de pausa'],
     ['endTime', 'Fim do turno'],
-  ] as const
-
-  labels.forEach(([field, label]) => {
+  ] as const).forEach(([field, label]) => {
     if (!isCompleteTimeInput(values[field])) {
       issues.push(`${label}: digite exatamente 4 numeros no formato 0000.`)
     }
   })
 
+  const hasBreakStart = values.breakStart.trim().length > 0
+  const hasBreakEnd = values.breakEnd.trim().length > 0
+  const hasBreak = hasBreakStart || hasBreakEnd
+
+  if (hasBreakStart !== hasBreakEnd) {
+    issues.push('Para usar pausa, preencha tanto o inicio quanto o fim da pausa.')
+  }
+
+  if (hasBreakStart && !isCompleteTimeInput(values.breakStart)) {
+    issues.push('Inicio de pausa: digite exatamente 4 numeros no formato 0000.')
+  }
+
+  if (hasBreakEnd && !isCompleteTimeInput(values.breakEnd)) {
+    issues.push('Fim de pausa: digite exatamente 4 numeros no formato 0000.')
+  }
+
   const start = parseTime(values.startTime, values.startPeriod)
-  const breakStart = parseTime(values.breakStart, values.breakStartPeriod)
-  const breakEnd = parseTime(values.breakEnd, values.breakEndPeriod)
+  const breakStart = hasBreakStart ? parseTime(values.breakStart, values.breakStartPeriod) : null
+  const breakEnd = hasBreakEnd ? parseTime(values.breakEnd, values.breakEndPeriod) : null
   const end = parseTime(values.endTime, values.endPeriod)
 
   if (isCompleteTimeInput(values.startTime) && start === null) {
@@ -218,14 +316,33 @@ export function buildSchedulePreview(values: SchedulePreviewInput) {
     issues.push('Fim do turno invalido para o periodo selecionado.')
   }
 
-  if ([start, breakStart, breakEnd, end].some((item) => item === null)) {
+  if (start === null || end === null || (hasBreak && (breakStart === null || breakEnd === null))) {
     return { netMinutes: undefined, issues }
   }
 
   const safeStart = start as number
+  const safeEnd = end as number
+
+  if (!hasBreak) {
+    const [normalizedStart, normalizedEnd] = normalizeSequentialTimes([safeStart, safeEnd])
+    const netMinutes = normalizedEnd - normalizedStart
+
+    if (netMinutes <= 0) {
+      issues.push('A jornada liquida precisa ser maior que zero.')
+      return { netMinutes: undefined, issues }
+    }
+
+    return {
+      netMinutes,
+      grossMinutes: netMinutes,
+      breakDurationMinutes: 0,
+      hasBreak: false,
+      issues,
+    }
+  }
+
   const safeBreakStart = breakStart as number
   const safeBreakEnd = breakEnd as number
-  const safeEnd = end as number
 
   const [normalizedStart, normalizedBreakStart, normalizedBreakEnd, normalizedEnd] =
     normalizeSequentialTimes([safeStart, safeBreakStart, safeBreakEnd, safeEnd])
@@ -249,5 +366,11 @@ export function buildSchedulePreview(values: SchedulePreviewInput) {
     return { netMinutes: undefined, issues }
   }
 
-  return { netMinutes, issues }
+  return {
+    netMinutes,
+    grossMinutes: normalizedEnd - normalizedStart,
+    breakDurationMinutes: normalizedBreakEnd - normalizedBreakStart,
+    hasBreak: true,
+    issues,
+  }
 }

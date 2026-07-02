@@ -42,3 +42,14 @@
 - [x] extrair `dateUtils` e `formUtils`
 - [x] extrair `stateStore` e `stateRoutes` no backend
 - [ ] continuar quebrando `App.tsx` por dominios de tela e hooks
+
+### Fase 9
+- [ ] executar trilha de evolucao arquitetural inspirada no `gestor-estoque`
+- [ ] criar `docs/STATUS.md`, `docs/DECISIONS.md` e `docs/WORKLOG.md`
+- [ ] migrar de persistencia generica para persistencia tipada por entidade
+- [ ] introduzir `membership` por empresa no backend
+- [ ] preparar ambiente local com banco e sincronizacao remota -> local
+
+Documento detalhado:
+
+- [`docs/TODO-arquitetura-comparativa.md`](/home/leomassoni/Documentos/Igarapé/Projetos/TCC-SP/escala-laboral/docs/TODO-arquitetura-comparativa.md)

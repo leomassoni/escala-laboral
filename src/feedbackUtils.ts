@@ -5,6 +5,20 @@ export function buildInvalidUserWarning(validationMessages: string[]) {
   }
 }
 
+export function buildInvalidCollaboratorWarning(validationMessages: string[]) {
+  return {
+    title: 'Colaborador invalido',
+    messages: validationMessages,
+  }
+}
+
+export function buildInvalidFunctionWarning(validationMessages: string[]) {
+  return {
+    title: 'Funcao invalida',
+    messages: validationMessages,
+  }
+}
+
 export function buildInvalidScheduleWarning(messages: string[]) {
   return {
     title: 'Horario invalido',

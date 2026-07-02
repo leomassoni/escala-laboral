@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, startTransition, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
 import {
@@ -13,6 +13,8 @@ import { reportOptions } from './reportCatalog'
 import type { ReportId } from './reportCatalog'
 import { buildReportPrintHtml, buildReportWorksheetRows } from './reportExportUtils'
 import {
+  buildInvalidCollaboratorWarning,
+  buildInvalidFunctionWarning,
   buildDeletedScheduleFeedback,
   buildDuplicateScheduleFeedback,
   buildInvalidScheduleWarning,
@@ -76,10 +78,10 @@ import {
 } from './formatters'
 import {
   buildSchedulePreview,
+  buildUniqueScheduleAbbreviation,
   formatCnpj,
   formatCpf,
   formatZipCode,
-  normalizeAbbreviation,
   normalizeLocationValue,
   normalizeSequentialTimes,
   normalizeTypedTime,
@@ -116,6 +118,7 @@ import {
   getCompanyUserMembershipsFromCredentials,
   getSectorNamesForCompany,
 } from './sessionUtils'
+import { EntityListTable } from './entityListTable'
 import {
   findCompanyById,
   findSystemAdminByCredentials,
@@ -252,6 +255,58 @@ type ScheduleRecord = {
   validationMessage: string
 }
 
+type ScaleReplicationModalState = {
+  collaboratorId: number
+  mode: 'sequence' | 'weekly'
+  sourceStartDate: string
+  sourceEndDate: string
+  targetStartDate: string
+  weeklyRepeatCount: string
+  overwriteExisting: boolean
+  copyDaysOff: boolean
+}
+
+type ScaleBatchModalState = {
+  weekStart: string
+  employmentScope: 'TODOS' | CollaboratorEmploymentType
+  scheduleIdValue: string
+  selectedDates: string[]
+  overwriteExisting: boolean
+}
+
+const collaboratorListDefaultColumnOrder = [
+  'nome',
+  'cpf',
+  'vinculo',
+  'funcoes',
+  'principal',
+  'contato',
+  'pix',
+  'status',
+]
+
+const functionListDefaultColumnOrder = [
+  'funcao',
+  'setor',
+  'salario',
+  'cota',
+  'extra',
+  'descricao',
+  'status',
+]
+
+const scheduleListDefaultColumnOrder = [
+  'turno',
+  'sigla',
+  'entrada',
+  'pausa',
+  'retorno',
+  'saida',
+  'jornada',
+  'status',
+  'validacao',
+]
+
 type ScaleAssignmentRecord = {
   id: number
   companyId: number
@@ -352,6 +407,7 @@ type ValidationResult = {
   errors: string[]
   notes: string[]
   netMinutes?: number
+  canOverride?: boolean
 }
 
 type ScheduleFormState = {
@@ -820,6 +876,10 @@ function computeScheduleNetMinutes(values: ScheduleFormState) {
   return buildSchedulePreview(values).netMinutes
 }
 
+function getNextNumericId<T extends { id: number }>(items: T[]) {
+  return items.reduce((max, item) => Math.max(max, item.id), 0) + 1
+}
+
 function mergeSeedAgreements(storedAgreements: Array<CollectiveAgreementRecord & { isActive?: boolean }>) {
   if (storedAgreements.length === 0) {
     return initialCollectiveAgreements.map((item) => ({ ...item, isActive: item.isActive ?? true }))
@@ -885,99 +945,85 @@ function validateSchedule(
   company: CompanyRecord | null,
   agreement: CollectiveAgreementRecord | null,
 ): ValidationResult {
-  const errors: string[] = []
+  const blockingErrors: string[] = []
+  const infractions: string[] = []
   const notes: string[] = []
-  const start = parseTime(values.startTime, values.startPeriod)
-  const breakStart = parseTime(values.breakStart, values.breakStartPeriod)
-  const breakEnd = parseTime(values.breakEnd, values.breakEndPeriod)
-  const end = parseTime(values.endTime, values.endPeriod)
   const schedulePreview = buildSchedulePreview(values)
 
   if (!values.shiftName.trim()) {
-    errors.push('Informe o nome do turno.')
+    blockingErrors.push('Informe o nome do turno.')
   }
 
-  errors.push(...schedulePreview.issues)
+  blockingErrors.push(...schedulePreview.issues)
 
-  if (
-    schedulePreview.netMinutes !== undefined &&
-    start !== null &&
-    breakStart !== null &&
-    breakEnd !== null &&
-    end !== null
-  ) {
-    const [normalizedStart, normalizedBreakStart, normalizedBreakEnd, normalizedEnd] =
-      normalizeSequentialTimes([start, breakStart, breakEnd, end])
+  if (schedulePreview.netMinutes !== undefined) {
+    const start = parseTime(values.startTime, values.startPeriod)
+    const end = parseTime(values.endTime, values.endPeriod)
+    const grossDuration =
+      schedulePreview.grossMinutes ??
+      (start !== null && end !== null ? normalizeSequentialTimes([start, end])[1] - normalizeSequentialTimes([start, end])[0] : undefined)
+    const breakDuration = schedulePreview.breakDurationMinutes ?? 0
+    const netDuration = schedulePreview.netMinutes
 
-    const grossDuration = normalizedEnd - normalizedStart
-    const breakDuration = normalizedBreakEnd - normalizedBreakStart
-    const netDuration = grossDuration - breakDuration
-
-    if (!(normalizedStart < normalizedBreakStart && normalizedBreakStart < normalizedBreakEnd && normalizedBreakEnd < normalizedEnd)) {
-      errors.push('A sequencia de inicio, pausa e fim do turno esta invalida.')
-    }
-
-    if (netDuration <= 0) {
-      errors.push('A jornada liquida precisa ser maior que zero.')
-    }
-
-    const longShiftThreshold = 360
-    const midShiftThreshold = 240
-    const standardLongBreak = agreement?.rules.standardMealBreakAfterSixHoursMinutes ?? 60
+    if (grossDuration !== undefined) {
+      const longShiftThreshold = 360
+      const midShiftThreshold = 240
+      const standardLongBreak = agreement?.rules.standardMealBreakAfterSixHoursMinutes ?? 60
     const shortBreak = agreement?.rules.shortShiftBreakMinutes ?? 15
     const standardBreakMax = agreement?.rules.standardBreakMaxMinutes ?? 120
     const healthPlanBreakMax = agreement?.rules.healthPlanBreakMaxMinutes ?? 120
-    const specialBreakMin = agreement?.rules.specialBreakMinMinutes ?? 30
-    const specialBreakMax = agreement?.rules.specialBreakMaxMinutes ?? 240
-    const maxDailyMinutes = agreement?.rules.maxDailyMinutes ?? 600
+      const specialBreakMin = agreement?.rules.specialBreakMinMinutes ?? 30
+      const specialBreakMax = agreement?.rules.specialBreakMaxMinutes ?? 240
+      const maxDailyMinutes = agreement?.rules.maxDailyMinutes ?? 600
 
-    if (grossDuration > longShiftThreshold) {
-      if (company?.collectiveProfile === 'regramento-especifico') {
-        if (breakDuration < specialBreakMin || breakDuration > specialBreakMax) {
-          errors.push(
-            `Para empresa habilitada em regramento especifico, o intervalo deve ficar entre ${specialBreakMin} e ${specialBreakMax} minutos.`,
-          )
-        }
-      } else {
-        if (breakDuration < standardLongBreak) {
-          errors.push(
-            `Jornadas acima de 6 horas exigem ao menos ${standardLongBreak} minutos de intervalo intrajornada.`,
-          )
-        }
+      if (grossDuration > longShiftThreshold) {
+        if (company?.collectiveProfile === 'regramento-especifico') {
+          if (breakDuration < specialBreakMin || breakDuration > specialBreakMax) {
+            infractions.push(
+              `Para empresa habilitada em regramento especifico, o intervalo deve ficar entre ${specialBreakMin} e ${specialBreakMax} minutos.`,
+            )
+          }
+        } else {
+          if (breakDuration < standardLongBreak) {
+            infractions.push(
+              `Jornadas acima de 6 horas exigem ao menos ${standardLongBreak} minutos de intervalo intrajornada.`,
+            )
+          }
 
-        const maxBreakAllowed =
-          company?.collectiveProfile === 'plano-saude' ? healthPlanBreakMax : standardBreakMax
+          const maxBreakAllowed =
+            company?.collectiveProfile === 'plano-saude' ? healthPlanBreakMax : standardBreakMax
 
-        if (breakDuration > maxBreakAllowed) {
-          errors.push(
-            company?.collectiveProfile === 'plano-saude'
-              ? `Com perfil de plano de saude, o intervalo nao pode exceder ${healthPlanBreakMax} minutos nesta CCT.`
-              : `Nesta CCT, intervalos acima de ${standardBreakMax} minutos exigem habilitacao especifica da empresa.`,
-          )
+          if (breakDuration > maxBreakAllowed) {
+            infractions.push(
+              company?.collectiveProfile === 'plano-saude'
+                ? `Com perfil de plano de saude, o intervalo nao pode exceder ${healthPlanBreakMax} minutos nesta CCT.`
+                : `Nesta CCT, intervalos acima de ${standardBreakMax} minutos exigem habilitacao especifica da empresa.`,
+            )
+          }
         }
       }
-    }
 
-    if (grossDuration > midShiftThreshold && grossDuration <= longShiftThreshold && breakDuration < shortBreak) {
-      errors.push(`Jornadas entre 4 e 6 horas exigem ao menos ${shortBreak} minutos de intervalo.`)
-    }
+      if (grossDuration > midShiftThreshold && grossDuration <= longShiftThreshold && breakDuration < shortBreak) {
+        infractions.push(`Jornadas entre 4 e 6 horas exigem ao menos ${shortBreak} minutos de intervalo.`)
+      }
 
-    if (netDuration > 480) {
-      notes.push('Jornadas liquidas acima de 8 horas pedem verificacao de compensacao, acordo ou horas extras.')
-    }
+      if (netDuration > 480) {
+        notes.push('Jornadas liquidas acima de 8 horas pedem verificacao de compensacao, acordo ou horas extras.')
+      }
 
-    if (netDuration > maxDailyMinutes) {
-      errors.push(
-        `A jornada liquida ultrapassa ${Math.floor(maxDailyMinutes / 60)} horas e precisa de revisao antes do uso.`,
-      )
+      if (netDuration > maxDailyMinutes) {
+        infractions.push(
+          `A jornada liquida ultrapassa ${Math.floor(maxDailyMinutes / 60)} horas e precisa de revisao antes do uso.`,
+        )
+      }
     }
   }
 
   if (!company) {
-    errors.push('Selecione uma empresa antes de cadastrar horarios.')
+    blockingErrors.push('Selecione uma empresa antes de cadastrar horarios.')
   } else if (!agreement) {
-    errors.push(
-      `Nao ha convencao coletiva parametrizada para ${company.city}/${company.state}. Cadastre ou vincule uma CCT antes de validar horarios.`,
+    infractions.push(
+      `Nao ha convencao coletiva parametrizada para ${company.city}/${company.state}. O horario pode ser salvo, mas ficara sem validacao regulatoria automatica.`,
     )
   } else {
     notes.push(
@@ -990,12 +1036,15 @@ function validateSchedule(
     }
   }
 
-  return { valid: errors.length === 0, errors, notes, netMinutes: errors.length === 0 ? (() => {
-    if (schedulePreview.netMinutes === undefined) {
-      return undefined
-    }
-    return schedulePreview.netMinutes
-  })() : undefined }
+  const canOverride = blockingErrors.length === 0 && infractions.length > 0
+
+  return {
+    valid: blockingErrors.length === 0 && infractions.length === 0,
+    errors: blockingErrors.length > 0 ? blockingErrors : infractions,
+    notes,
+    netMinutes: blockingErrors.length === 0 ? schedulePreview.netMinutes : undefined,
+    canOverride,
+  }
 }
 
 function App() {
@@ -1133,6 +1182,8 @@ function App() {
   })
   const remoteSyncTimeoutRef = useRef<number | null>(null)
   const pendingDiscardActionRef = useRef<(() => void) | null>(null)
+  const pendingScaleReplicationRef = useRef<(() => void) | null>(null)
+  const pendingScaleBatchRef = useRef<(() => void) | null>(null)
   const [session, setSession] = useState<Session | null>(null)
   const [currentCompanyId, setCurrentCompanyId] = useState<number | null>(null)
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
@@ -1145,9 +1196,24 @@ function App() {
   const [agreementForm, setAgreementForm] = useState(emptyAgreementForm)
   const [editingAgreementId, setEditingAgreementId] = useState<number | null>(null)
   const [scheduleFeedback, setScheduleFeedback] = useState<ValidationResult | null>(null)
-  const [scheduleWarning, setScheduleWarning] = useState<{ title: string; messages: string[] } | null>(null)
+  const pendingScheduleOverrideRef = useRef<(() => void) | null>(null)
+  const [scheduleWarning, setScheduleWarning] = useState<{
+    title: string
+    messages: string[]
+    confirmLabel?: string
+  } | null>(null)
+  const [collaboratorWarning, setCollaboratorWarning] = useState<{ title: string; messages: string[] } | null>(null)
+  const [functionWarning, setFunctionWarning] = useState<{ title: string; messages: string[] } | null>(null)
   const [userWarning, setUserWarning] = useState<{ title: string; messages: string[] } | null>(null)
   const [discardWarning, setDiscardWarning] = useState<{ title: string; message: string } | null>(null)
+  const [collaboratorListSearch, setCollaboratorListSearch] = useState('')
+  const [functionListSearch, setFunctionListSearch] = useState('')
+  const [scheduleListSearch, setScheduleListSearch] = useState('')
+  const [collaboratorListColumnOrder, setCollaboratorListColumnOrder] = useState(
+    collaboratorListDefaultColumnOrder,
+  )
+  const [functionListColumnOrder, setFunctionListColumnOrder] = useState(functionListDefaultColumnOrder)
+  const [scheduleListColumnOrder, setScheduleListColumnOrder] = useState(scheduleListDefaultColumnOrder)
   const [editingFunctionId, setEditingFunctionId] = useState<number | null>(null)
   const [editingScheduleId, setEditingScheduleId] = useState<number | null>(null)
   const [editingUserId, setEditingUserId] = useState<number | null>(null)
@@ -1158,6 +1224,9 @@ function App() {
   const [scaleAnchorDate, setScaleAnchorDate] = useState(toIsoDate(new Date()))
   const [scaleMonth, setScaleMonth] = useState(toIsoDate(new Date()).slice(0, 7))
   const [scaleSectorFilter, setScaleSectorFilter] = useState('Todos')
+  const [scaleFunctionFilter, setScaleFunctionFilter] = useState('Todos')
+  const [scaleSearch, setScaleSearch] = useState('')
+  const [scaleShowIrregularOnly, setScaleShowIrregularOnly] = useState(false)
   const [selectedReportId, setSelectedReportId] = useState<ReportId>('scale-consolidated')
   const [reportStartDate, setReportStartDate] = useState(`${toIsoDate(new Date()).slice(0, 7)}-01`)
   const [reportEndDate, setReportEndDate] = useState(toIsoDate(new Date()))
@@ -1172,6 +1241,18 @@ function App() {
   const [isNotificationModalOpen, setIsNotificationModalOpen] = useState(false)
   const [extraSearchByWeek, setExtraSearchByWeek] = useState<Record<string, string>>({})
   const [scaleWarning, setScaleWarning] = useState<{ title: string; messages: string[] } | null>(null)
+  const [scaleBatchModal, setScaleBatchModal] = useState<ScaleBatchModalState | null>(null)
+  const [scaleBatchWarning, setScaleBatchWarning] = useState<{
+    title: string
+    messages: string[]
+    confirmLabel: string
+  } | null>(null)
+  const [scaleReplicationModal, setScaleReplicationModal] = useState<ScaleReplicationModalState | null>(null)
+  const [scaleReplicationWarning, setScaleReplicationWarning] = useState<{
+    title: string
+    messages: string[]
+    confirmLabel: string
+  } | null>(null)
   const [scaleCommentModal, setScaleCommentModal] = useState<{
     collaboratorId: number
     date: string
@@ -1249,6 +1330,112 @@ function App() {
   const availableSectorNames = Array.from(new Set(companySectors.map((item) => item.name))).sort((left, right) =>
     left.localeCompare(right),
   )
+  const collaboratorProfileByCpf = useMemo(
+    () =>
+      collaboratorProfiles.reduce<Record<string, CollaboratorProfileRecord>>((accumulator, profile) => {
+        accumulator[profile.cpf.replace(/\D/g, '')] = profile
+        return accumulator
+      }, {}),
+    [collaboratorProfiles],
+  )
+  const collaboratorListColumns = useMemo(
+    () => [
+      {
+        key: 'nome',
+        label: 'Nome',
+        getValue: (item: CollaboratorRecord) =>
+          collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.fullName ?? item.cpf,
+        renderCell: (item: CollaboratorRecord) => (
+          <strong>{collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.fullName ?? item.cpf}</strong>
+        ),
+      },
+      { key: 'cpf', label: 'CPF', getValue: (item: CollaboratorRecord) => item.cpf },
+      { key: 'vinculo', label: 'Vinculo', getValue: (item: CollaboratorRecord) => item.employmentType },
+      { key: 'funcoes', label: 'Funcoes', getValue: (item: CollaboratorRecord) => item.functions.join(', ') },
+      { key: 'principal', label: 'Principal', getValue: (item: CollaboratorRecord) => item.primaryFunction },
+      {
+        key: 'contato',
+        label: 'Contato',
+        getValue: (item: CollaboratorRecord) =>
+          collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.contact ?? 'Contato pendente',
+      },
+      {
+        key: 'pix',
+        label: 'PIX',
+        getValue: (item: CollaboratorRecord) =>
+          collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.pixKey ?? 'PIX pendente',
+      },
+      {
+        key: 'status',
+        label: 'Status',
+        getValue: (item: CollaboratorRecord) => (item.isActive ? 'Ativo' : 'Inativo'),
+      },
+    ],
+    [collaboratorProfileByCpf],
+  )
+  const functionListColumns = useMemo(
+    () => [
+      {
+        key: 'funcao',
+        label: 'Funcao',
+        getValue: (item: FunctionRecord) => item.name,
+        renderCell: (item: FunctionRecord) => <strong>{item.name}</strong>,
+      },
+      { key: 'setor', label: 'Setor', getValue: (item: FunctionRecord) => item.sector },
+      {
+        key: 'salario',
+        label: 'Base salarial',
+        getValue: (item: FunctionRecord) => formatCurrency(parseCurrencyValue(item.baseSalary || '0')),
+      },
+      { key: 'cota', label: 'Cota', getValue: (item: FunctionRecord) => item.serviceQuota || 'Nao informada' },
+      {
+        key: 'extra',
+        label: 'Paga extra',
+        getValue: (item: FunctionRecord) =>
+          item.extraPayValue ? formatCurrency(parseCurrencyValue(item.extraPayValue)) : 'Nao informado',
+      },
+      { key: 'descricao', label: 'Descritivo', getValue: (item: FunctionRecord) => item.description },
+      {
+        key: 'status',
+        label: 'Status',
+        getValue: (item: FunctionRecord) => (item.isActive ? 'Ativa' : 'Inativa'),
+      },
+    ],
+    [],
+  )
+  const scheduleListColumns = useMemo(
+    () => [
+      {
+        key: 'turno',
+        label: 'Turno',
+        getValue: (item: ScheduleRecord) => item.shiftName,
+        renderCell: (item: ScheduleRecord) => <strong>{item.shiftName}</strong>,
+      },
+      { key: 'sigla', label: 'Sigla', getValue: (item: ScheduleRecord) => item.abbreviation },
+      { key: 'entrada', label: 'Entrada', getValue: (item: ScheduleRecord) => `${item.startTime} ${item.startPeriod}` },
+      {
+        key: 'pausa',
+        label: 'Inicio pausa',
+        getValue: (item: ScheduleRecord) =>
+          item.breakStart && item.breakEnd ? `${item.breakStart} ${item.breakStartPeriod}` : 'Sem pausa',
+      },
+      {
+        key: 'retorno',
+        label: 'Fim pausa',
+        getValue: (item: ScheduleRecord) =>
+          item.breakStart && item.breakEnd ? `${item.breakEnd} ${item.breakEndPeriod}` : 'Nao se aplica',
+      },
+      { key: 'saida', label: 'Saida', getValue: (item: ScheduleRecord) => `${item.endTime} ${item.endPeriod}` },
+      { key: 'jornada', label: 'Horas', getValue: (item: ScheduleRecord) => formatWorkedHours(item.netMinutes) },
+      {
+        key: 'status',
+        label: 'Status',
+        getValue: (item: ScheduleRecord) => (item.isActive ? 'Ativo' : 'Inativo'),
+      },
+      { key: 'validacao', label: 'Validacao', getValue: (item: ScheduleRecord) => item.validationMessage },
+    ],
+    [],
+  )
   const additionalUserCompanyOptions =
     currentCompanyId === null
       ? []
@@ -1312,6 +1499,21 @@ function App() {
     scaleSectorFilter === 'Todos' || !visibleScaleSectorOptions.includes(scaleSectorFilter)
       ? 'Todos'
       : scaleSectorFilter
+  const visibleScaleFunctionOptions = Array.from(
+    new Set(
+      companyCollaborators
+        .filter((item) => {
+          const sectorName = getCollaboratorSector(item)
+          return effectiveScaleSectorFilter === 'Todos' || sectorName === effectiveScaleSectorFilter
+        })
+        .map((item) => item.primaryFunction)
+        .filter(Boolean),
+    ),
+  ).sort((left, right) => left.localeCompare(right))
+  const effectiveScaleFunctionFilter =
+    scaleFunctionFilter === 'Todos' || visibleScaleFunctionOptions.includes(scaleFunctionFilter)
+      ? scaleFunctionFilter
+      : 'Todos'
   const visibleAppSections: AppSection[] = appSections.filter((section) => effectiveSectionAccess[section])
   const canManageCollaboratorActivation =
     effectiveSectionAccess.Colaboradores &&
@@ -1387,6 +1589,180 @@ function App() {
     scaleCommentModal === null
       ? null
       : companyCollaborators.find((item) => item.id === scaleCommentModal.collaboratorId) ?? null
+  const activeScaleReplicationCollaborator =
+    scaleReplicationModal === null
+      ? null
+      : companyCollaborators.find((item) => item.id === scaleReplicationModal.collaboratorId) ?? null
+  const activeScaleReplicationPreview = (() => {
+    if (
+      scaleReplicationModal === null ||
+      activeScaleReplicationCollaborator === null ||
+      currentCompanyId === null
+    ) {
+      return []
+    }
+
+    const { replicationPlan } = buildScaleReplicationPlan(scaleReplicationModal)
+    const sourceAssignmentByDate = new Map(
+      companyScaleAssignments
+        .filter(
+          (assignment) =>
+            assignment.companyId === currentCompanyId &&
+            assignment.collaboratorId === activeScaleReplicationCollaborator.id,
+        )
+        .map((assignment) => [assignment.date, assignment]),
+    )
+    const currentMaxId = scaleAssignments.reduce((max, item) => Math.max(max, item.id), 0)
+    let nextId = currentMaxId
+    const simulatedAssignments = scaleAssignments.filter((assignment) => {
+      if (
+        assignment.companyId !== currentCompanyId ||
+        assignment.collaboratorId !== activeScaleReplicationCollaborator.id
+      ) {
+        return true
+      }
+
+      const replicationTarget =
+        replicationPlan.find((planItem) => planItem.targetDate === assignment.date) ?? null
+      if (!replicationTarget) {
+        return true
+      }
+
+      const sourceAssignment = sourceAssignmentByDate.get(replicationTarget.sourceDate) ?? null
+      if (!scaleReplicationModal.overwriteExisting && sourceAssignment) {
+        return true
+      }
+
+      if (!scaleReplicationModal.overwriteExisting && !sourceAssignment) {
+        return true
+      }
+
+      if (!scaleReplicationModal.copyDaysOff && !sourceAssignment) {
+        return true
+      }
+
+      return false
+    })
+
+    replicationPlan.forEach(({ sourceDate, targetDate }) => {
+      const sourceAssignment = sourceAssignmentByDate.get(sourceDate) ?? null
+      const hasExistingTarget = simulatedAssignments.some(
+        (assignment) =>
+          assignment.companyId === currentCompanyId &&
+          assignment.collaboratorId === activeScaleReplicationCollaborator.id &&
+          assignment.date === targetDate,
+      )
+
+      if (!sourceAssignment) {
+        return
+      }
+
+      if (hasExistingTarget && !scaleReplicationModal.overwriteExisting) {
+        return
+      }
+
+      nextId += 1
+      simulatedAssignments.push({
+        id: nextId,
+        companyId: currentCompanyId,
+        collaboratorId: activeScaleReplicationCollaborator.id,
+        date: targetDate,
+        scheduleId: sourceAssignment.scheduleId,
+      })
+    })
+
+    const issuesByWeekStart = new Map<string, string[]>()
+    Array.from(new Set(replicationPlan.map((item) => toIsoDate(startOfWeek(item.targetDate))))).forEach(
+      (weekStart) => {
+        issuesByWeekStart.set(
+          weekStart,
+          validateScaleRow(
+            activeScaleReplicationCollaborator,
+            getWeekDates(weekStart),
+            simulatedAssignments.filter((assignment) => assignment.companyId === currentCompanyId),
+          ).issues,
+        )
+      },
+    )
+
+    return replicationPlan.map((item) => {
+      const targetAssignment =
+        companyScaleAssignments.find(
+          (assignment) =>
+            assignment.collaboratorId === activeScaleReplicationCollaborator.id &&
+            assignment.date === item.targetDate,
+        ) ?? null
+      const sourceAssignment = sourceAssignmentByDate.get(item.sourceDate) ?? null
+      const sourceSchedule = sourceAssignment ? getScheduleById(sourceAssignment.scheduleId) : null
+      const targetSchedule = targetAssignment ? getScheduleById(targetAssignment.scheduleId) : null
+      const irregularityMessages =
+        issuesByWeekStart.get(toIsoDate(startOfWeek(item.targetDate))) ?? []
+
+      return {
+        ...item,
+        sourceLabel: sourceSchedule?.abbreviation ?? 'Folga',
+        targetLabel: targetSchedule?.abbreviation ?? 'Sem escala',
+        willOverwrite: !!targetAssignment && scaleReplicationModal.overwriteExisting,
+        alreadyFilled: !!targetAssignment,
+        hasIrregularityRisk: irregularityMessages.length > 0,
+        irregularityMessages,
+      }
+    })
+  })()
+  const activeScaleReplicationPreviewSummary = Array.from(
+    activeScaleReplicationPreview.reduce(
+      (accumulator, item) => {
+        const weekStart = toIsoDate(startOfWeek(item.targetDate))
+        const current = accumulator.get(weekStart) ?? {
+          weekStart,
+          total: 0,
+          overwrite: 0,
+          fillEmpty: 0,
+          keepExisting: 0,
+          risk: 0,
+        }
+
+        current.total += 1
+        if (item.willOverwrite) {
+          current.overwrite += 1
+        } else if (item.alreadyFilled) {
+          current.keepExisting += 1
+        } else {
+          current.fillEmpty += 1
+        }
+
+        if (item.hasIrregularityRisk) {
+          current.risk += 1
+        }
+
+        accumulator.set(weekStart, current)
+        return accumulator
+      },
+      new Map<
+        string,
+        {
+          weekStart: string
+          total: number
+          overwrite: number
+          fillEmpty: number
+          keepExisting: number
+          risk: number
+        }
+      >(),
+    ),
+  )
+    .map(([, value]) => value)
+    .sort((left, right) => left.weekStart.localeCompare(right.weekStart))
+  const activeScaleBatchWeekDates =
+    scaleBatchModal === null ? [] : getWeekDates(scaleBatchModal.weekStart)
+  const activeScaleBatchRows =
+    scaleBatchModal === null
+      ? []
+      : getVisibleWeekRows(activeScaleBatchWeekDates).filter((item) =>
+          scaleBatchModal.employmentScope === 'TODOS'
+            ? true
+            : item.employmentType === scaleBatchModal.employmentScope,
+        )
   const companyAgreementField = (
     <>
       <div className="field-span agreement-panel">
@@ -1464,6 +1840,7 @@ function App() {
   )
   const scaleWeeks = buildScaleWeeks()
   const scaleSectorOptions = ['Todos', ...visibleScaleSectorOptions]
+  const scaleFunctionOptions = ['Todos', ...visibleScaleFunctionOptions]
   const visibleScaleCollaborators = companyCollaborators.filter((item) => {
     if (isViewer && currentViewerCollaboratorId !== item.id) {
       return false
@@ -1472,6 +1849,30 @@ function App() {
     const sectorName = getCollaboratorSector(item)
     if (effectiveScaleSectorFilter !== 'Todos' && sectorName !== effectiveScaleSectorFilter) {
       return false
+    }
+
+    if (
+      effectiveScaleFunctionFilter !== 'Todos' &&
+      item.primaryFunction !== effectiveScaleFunctionFilter
+    ) {
+      return false
+    }
+
+    if (scaleSearch.trim()) {
+      const profile = getCollaboratorProfile(item.cpf)
+      const haystack = [
+        profile?.fullName ?? '',
+        item.cpf,
+        item.primaryFunction,
+        item.employmentType,
+        sectorName,
+      ]
+        .join(' ')
+        .toLowerCase()
+
+      if (!haystack.includes(scaleSearch.trim().toLowerCase())) {
+        return false
+      }
     }
 
     return visibleScaleSectorOptions.length === 0 || visibleScaleSectorOptions.includes(sectorName)
@@ -1497,10 +1898,15 @@ function App() {
     : [
         'CLT: jornadas entre 4h e 6h exigem no minimo 15 minutos de intervalo.',
         'CLT: jornadas acima de 6h exigem no minimo 60 minutos de intervalo.',
-        'Cadastre ou vincule uma CCT para liberar a validacao final do horario.',
+        'Sem CCT vinculada, o sistema permite o cadastro com aviso e sem validacao regulatoria automatica.',
       ]
   const liveSchedulePreview = buildSchedulePreview(scheduleForm)
   const liveWorkedMinutes = computeScheduleNetMinutes(scheduleForm)
+  const liveScheduleAbbreviation = buildUniqueScheduleAbbreviation(
+    scheduleForm.shiftName,
+    companySchedules.map((item) => item.abbreviation),
+    schedules.find((item) => item.id === editingScheduleId)?.abbreviation,
+  )
   const activeReportDataset = getActiveReportDataset()
   const activeVisibleReportColumnKeys = getVisibleReportColumnKeys(
     selectedReportId,
@@ -2053,7 +2459,7 @@ function App() {
     }
 
     const nextMessage: ScaleCommentMessage = {
-      id: Date.now(),
+      id: getNextNumericId(companyScaleComments.flatMap((thread) => thread.messages)),
       authorName: currentSessionActor.name,
       authorRole: currentSessionActor.role,
       authorKey: currentSessionKey ?? undefined,
@@ -2434,7 +2840,11 @@ function App() {
         Number(right.totalMinutesRaw) - Number(left.totalMinutesRaw) ||
         String(left.colaborador).localeCompare(String(right.colaborador)),
       )
-      .map(({ totalMinutesRaw, ...row }) => row)
+      .map((row) => {
+        const { totalMinutesRaw, ...reportRow } = row
+        void totalMinutesRaw
+        return reportRow
+      })
 
     const totalMinutes = getAssignmentsInReportRange().reduce((sum, assignment) => {
       const collaborator = companyCollaborators.find((item) => item.id === assignment.collaboratorId) ?? null
@@ -2505,7 +2915,11 @@ function App() {
         String(left.semana).localeCompare(String(right.semana)) ||
         String(left.colaborador).localeCompare(String(right.colaborador)),
       )
-      .map(({ issuesCount, ...row }) => row)
+      .map((row) => {
+        const { issuesCount, ...reportRow } = row
+        void issuesCount
+        return reportRow
+      })
 
     return {
       id: 'scale-irregularities',
@@ -2559,7 +2973,11 @@ function App() {
         String(left.data).localeCompare(String(right.data)) ||
         String(left.colaborador).localeCompare(String(right.colaborador)),
       )
-      .map(({ custoRaw, ...row }) => row)
+      .map((row) => {
+        const { custoRaw, ...reportRow } = row
+        void custoRaw
+        return reportRow
+      })
 
     const totalCost = rows.reduce((sum, item) => sum + parseCurrencyValue(String(item.custo)), 0)
 
@@ -2697,7 +3115,11 @@ function App() {
         Number(right.horasTotaisRaw) - Number(left.horasTotaisRaw) ||
         `${left.data}-${left.setor}-${left.funcao}`.localeCompare(`${right.data}-${right.setor}-${right.funcao}`),
       )
-      .map(({ horasTotaisRaw, ...row }) => row)
+      .map((row) => {
+        const { horasTotaisRaw, ...reportRow } = row
+        void horasTotaisRaw
+        return reportRow
+      })
 
     return {
       id: 'coverage',
@@ -2751,7 +3173,12 @@ function App() {
       Number(right.totalMinutesRaw) - Number(left.totalMinutesRaw) ||
       String(left.colaborador).localeCompare(String(right.colaborador)),
     )
-    .map(({ totalMinutesRaw, exposureMinutesRaw, ...row }) => row)
+    .map((row) => {
+      const { totalMinutesRaw, exposureMinutesRaw, ...reportRow } = row
+      void totalMinutesRaw
+      void exposureMinutesRaw
+      return reportRow
+    })
 
     return {
       id: 'hour-exposure',
@@ -2835,7 +3262,11 @@ function App() {
         Number(right.horasAlocadasRaw) - Number(left.horasAlocadasRaw) ||
         `${left.horario}`.localeCompare(`${right.horario}`),
       )
-      .map(({ horasAlocadasRaw, ...row }) => row)
+      .map((row) => {
+        const { horasAlocadasRaw, ...reportRow } = row
+        void horasAlocadasRaw
+        return reportRow
+      })
 
     return {
       id: 'schedule-usage',
@@ -3061,6 +3492,158 @@ function App() {
     return getMonthWeeks(scaleMonth)
   }
 
+  function getVisibleWeekRows(weekDates: Date[]) {
+    const weekStartValue = toIsoDate(weekDates[0])
+    const autoRows = visibleScaleCollaborators.filter((item) => {
+      if (item.employmentType === 'EXTRA') {
+        return false
+      }
+
+      return weekDates.some((date) => isCollaboratorActiveOnDate(item, toIsoDate(date)))
+    })
+    const extraRows = companyScaleExtraRoster
+      .filter((item) => item.weekStart === weekStartValue)
+      .map((item) => visibleScaleCollaborators.find((collaborator) => collaborator.id === item.collaboratorId) ?? null)
+      .filter(
+        (item): item is CollaboratorRecord =>
+          item !== null &&
+          weekDates.some((date) => isCollaboratorActiveOnDate(item, toIsoDate(date))),
+      )
+
+    return [...autoRows, ...extraRows].filter((item) => {
+      if (!scaleShowIrregularOnly) {
+        return true
+      }
+
+      return validateScaleRow(item, weekDates).issues.length > 0
+    })
+  }
+
+  function getDateRangeInclusive(startDate: string, endDate: string) {
+    const dates: string[] = []
+    const start = new Date(`${startDate}T12:00:00`)
+    const end = new Date(`${endDate}T12:00:00`)
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
+      return dates
+    }
+
+    const cursor = new Date(start)
+    while (cursor <= end) {
+      dates.push(toIsoDate(cursor))
+      cursor.setDate(cursor.getDate() + 1)
+    }
+
+    return dates
+  }
+
+  function addDaysToIsoDate(isoDate: string, daysToAdd: number) {
+    const nextDate = new Date(`${isoDate}T12:00:00`)
+    nextDate.setDate(nextDate.getDate() + daysToAdd)
+    return toIsoDate(nextDate)
+  }
+
+  function closeScaleReplicationModal() {
+    setScaleReplicationModal(null)
+  }
+
+  function closeScaleReplicationWarning() {
+    pendingScaleReplicationRef.current = null
+    setScaleReplicationWarning(null)
+  }
+
+  function confirmScaleReplicationWarning() {
+    const pendingAction = pendingScaleReplicationRef.current
+    pendingScaleReplicationRef.current = null
+    setScaleReplicationWarning(null)
+    pendingAction?.()
+  }
+
+  function openScaleReplicationModal(collaboratorId: number, weekDates: Date[]) {
+    const sourceStartDate = toIsoDate(weekDates[0])
+    const sourceEndDate = toIsoDate(weekDates[weekDates.length - 1])
+
+    setScaleReplicationModal({
+      collaboratorId,
+      mode: 'sequence',
+      sourceStartDate,
+      sourceEndDate,
+      targetStartDate: addDaysToIsoDate(sourceEndDate, 1),
+      weeklyRepeatCount: '4',
+      overwriteExisting: false,
+      copyDaysOff: true,
+    })
+  }
+
+  function closeScaleBatchModal() {
+    setScaleBatchModal(null)
+  }
+
+  function closeScaleBatchWarning() {
+    pendingScaleBatchRef.current = null
+    setScaleBatchWarning(null)
+  }
+
+  function confirmScaleBatchWarning() {
+    const pendingAction = pendingScaleBatchRef.current
+    pendingScaleBatchRef.current = null
+    setScaleBatchWarning(null)
+    pendingAction?.()
+  }
+
+  function openScaleBatchModal(weekDates: Date[]) {
+    setScaleBatchModal({
+      weekStart: toIsoDate(weekDates[0]),
+      employmentScope: 'TODOS',
+      scheduleIdValue: '',
+      selectedDates: weekDates.map((date) => toIsoDate(date)),
+      overwriteExisting: false,
+    })
+  }
+
+  function buildScaleReplicationPlan(modalState: ScaleReplicationModalState) {
+    const sourceDates = getDateRangeInclusive(modalState.sourceStartDate, modalState.sourceEndDate)
+    const weeklyRepeatCount = Number(modalState.weeklyRepeatCount)
+
+    if (sourceDates.length === 0 || !modalState.targetStartDate) {
+      return {
+        sourceDates,
+        weeklyRepeatCount,
+        replicationPlan: [] as Array<{ sourceDate: string; targetDate: string }>,
+      }
+    }
+
+    const replicationPlan =
+      modalState.mode === 'weekly'
+        ? !Number.isInteger(weeklyRepeatCount) || weeklyRepeatCount <= 0
+          ? []
+          : Array.from({ length: weeklyRepeatCount }).flatMap((_, repetitionIndex) =>
+              sourceDates.map((sourceDate) => {
+                const offsetDays =
+                  Math.round(
+                    (new Date(`${sourceDate}T12:00:00`).getTime() -
+                      new Date(`${modalState.sourceStartDate}T12:00:00`).getTime()) /
+                      86_400_000,
+                  ) + repetitionIndex * 7
+
+                return {
+                  sourceDate,
+                  targetDate: addDaysToIsoDate(modalState.targetStartDate, offsetDays),
+                }
+              }),
+            )
+        : sourceDates.map((sourceDate, index) => ({
+            sourceDate,
+            targetDate: addDaysToIsoDate(modalState.targetStartDate, index),
+          }))
+
+    return {
+      sourceDates,
+      weeklyRepeatCount,
+      replicationPlan,
+    }
+  }
+
   function addExtraToWeek(weekStartValue: string, collaboratorId: number) {
     if (!currentCompanyId) {
       return
@@ -3177,23 +3760,331 @@ function App() {
     }
   }
 
+  function applyScaleReplication(collaborator: CollaboratorRecord, allowIrregular: boolean) {
+    if (!currentCompanyId || !canEditScale || !scaleReplicationModal) {
+      return
+    }
+
+    const { sourceDates, weeklyRepeatCount, replicationPlan } = buildScaleReplicationPlan(scaleReplicationModal)
+    if (sourceDates.length === 0) {
+      setScaleWarning({
+        title: 'Periodo de origem invalido',
+        messages: ['Defina um periodo de origem valido para replicar a escala.'],
+      })
+      return
+    }
+
+    if (!scaleReplicationModal.targetStartDate) {
+      setScaleWarning({
+        title: 'Destino obrigatorio',
+        messages: ['Informe a data inicial de destino para replicar a escala.'],
+      })
+      return
+    }
+
+    if (
+      scaleReplicationModal.mode === 'weekly' &&
+      (!Number.isInteger(weeklyRepeatCount) || weeklyRepeatCount <= 0)
+    ) {
+      setScaleWarning({
+        title: 'Repeticoes invalidas',
+        messages: ['Informe um numero inteiro de semanas para a replicacao recorrente.'],
+      })
+      return
+    }
+
+    const targetDates = replicationPlan.map((item) => item.targetDate)
+    const sourceAssignmentByDate = new Map(
+      companyScaleAssignments
+        .filter(
+          (item) =>
+            item.collaboratorId === collaborator.id &&
+            sourceDates.includes(item.date),
+        )
+        .map((item) => [item.date, item]),
+    )
+
+    const currentMaxId = scaleAssignments.reduce((max, item) => Math.max(max, item.id), 0)
+    let nextId = currentMaxId
+    const nextAssignments = scaleAssignments.filter((item) => {
+      if (item.companyId !== currentCompanyId || item.collaboratorId !== collaborator.id) {
+        return true
+      }
+
+      const replicationTarget = replicationPlan.find((planItem) => planItem.targetDate === item.date) ?? null
+      if (!replicationTarget) {
+        return true
+      }
+
+      const sourceAssignment = sourceAssignmentByDate.get(replicationTarget.sourceDate) ?? null
+      if (!scaleReplicationModal.overwriteExisting && sourceAssignment) {
+        return true
+      }
+
+      if (!scaleReplicationModal.overwriteExisting && !sourceAssignment) {
+        return true
+      }
+
+      if (!scaleReplicationModal.copyDaysOff && !sourceAssignment) {
+        return true
+      }
+
+      return false
+    })
+
+    replicationPlan.forEach(({ sourceDate, targetDate }) => {
+      const sourceAssignment = sourceAssignmentByDate.get(sourceDate) ?? null
+      const hasExistingTarget = nextAssignments.some(
+        (item) =>
+          item.companyId === currentCompanyId &&
+          item.collaboratorId === collaborator.id &&
+          item.date === targetDate,
+      )
+
+      if (!sourceAssignment) {
+        return
+      }
+
+      if (hasExistingTarget && !scaleReplicationModal.overwriteExisting) {
+        return
+      }
+
+      nextId += 1
+      nextAssignments.push({
+        id: nextId,
+        companyId: currentCompanyId,
+        collaboratorId: collaborator.id,
+        date: targetDate,
+        scheduleId: sourceAssignment.scheduleId,
+      })
+    })
+
+    const affectedWeekStarts = Array.from(
+      new Set(targetDates.map((date) => toIsoDate(startOfWeek(date)))),
+    )
+    const replicationIssues = affectedWeekStarts.flatMap((weekStart) =>
+      validateScaleRow(collaborator, getWeekDates(weekStart), nextAssignments.filter((item) => item.companyId === currentCompanyId)).issues,
+    )
+
+    if (replicationIssues.length > 0 && !allowIrregular) {
+      pendingScaleReplicationRef.current = () => applyScaleReplication(collaborator, true)
+      setScaleReplicationWarning({
+        title: 'Replicacao com irregularidades',
+        messages: Array.from(new Set(replicationIssues)),
+        confirmLabel: 'Replicar mesmo assim',
+      })
+      return
+    }
+
+    const changedTargetDates = Array.from(new Set(targetDates)).filter((targetDate) => {
+      const currentAssignment = companyScaleAssignments.find(
+        (item) => item.collaboratorId === collaborator.id && item.date === targetDate,
+      ) ?? null
+      const nextAssignment = nextAssignments.find(
+        (item) =>
+          item.companyId === currentCompanyId &&
+          item.collaboratorId === collaborator.id &&
+          item.date === targetDate,
+      ) ?? null
+
+      return (currentAssignment?.scheduleId ?? null) !== (nextAssignment?.scheduleId ?? null)
+    })
+
+    if (changedTargetDates.length === 0) {
+      setScaleWarning({
+        title: 'Nada para replicar',
+        messages: [
+          'Nenhuma alteracao foi aplicada. Revise se ja existe escala igual no destino ou habilite a sobrescrita.',
+        ],
+      })
+      return
+    }
+
+    setScaleAssignments(nextAssignments)
+    closeScaleReplicationModal()
+
+    if (currentSessionActor) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Escala',
+        action: 'Atualizacao',
+        targetType: 'Escala',
+        targetLabel: `${getCollaboratorProfile(collaborator.cpf)?.fullName ?? collaborator.cpf} • replicacao ${scaleReplicationModal.sourceStartDate} a ${scaleReplicationModal.sourceEndDate}`,
+        severity: replicationIssues.length > 0 ? 'warning' : 'info',
+        impactSummary:
+          replicationIssues.length > 0
+            ? 'Replicacao de escala executada com alerta de irregularidade.'
+            : scaleReplicationModal.mode === 'weekly'
+              ? 'Replicacao de escala executada em recorrencia semanal.'
+              : 'Replicacao de escala executada por periodo.',
+        relatedCompanyIds: [currentCompanyId],
+      })
+    }
+
+    if (replicationIssues.length > 0) {
+      setScaleWarning({
+        title: `Replicacao concluida para ${getCollaboratorProfile(collaborator.cpf)?.fullName ?? collaborator.cpf}`,
+        messages: Array.from(new Set(replicationIssues)),
+      })
+      return
+    }
+
+    setScaleWarning({
+      title: 'Replicacao concluida',
+      messages: [
+        `Escala replicada de ${formatDateLabel(scaleReplicationModal.sourceStartDate)} ate ${formatDateLabel(scaleReplicationModal.sourceEndDate)}.`,
+        scaleReplicationModal.mode === 'weekly'
+          ? `Recorrencia semanal iniciada em ${formatDateLabel(scaleReplicationModal.targetStartDate)} por ${weeklyRepeatCount} semana(s).`
+          : `Novo periodo iniciado em ${formatDateLabel(scaleReplicationModal.targetStartDate)}.`,
+      ],
+    })
+  }
+
+  function submitScaleReplication(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    if (!scaleReplicationModal) {
+      return
+    }
+
+    const collaborator = companyCollaborators.find(
+      (item) => item.id === scaleReplicationModal.collaboratorId,
+    ) ?? null
+
+    if (!collaborator) {
+      setScaleWarning({
+        title: 'Colaborador indisponivel',
+        messages: ['O colaborador selecionado nao foi encontrado na empresa ativa.'],
+      })
+      return
+    }
+
+    applyScaleReplication(collaborator, false)
+  }
+
+  function applyScaleBatch(allowIrregular: boolean) {
+    if (!currentCompanyId || !canEditScale || !scaleBatchModal) {
+      return
+    }
+
+    const weekDates = getWeekDates(scaleBatchModal.weekStart)
+    const targetRows = getVisibleWeekRows(weekDates).filter((item) =>
+      scaleBatchModal.employmentScope === 'TODOS'
+        ? true
+        : item.employmentType === scaleBatchModal.employmentScope,
+    )
+
+    if (targetRows.length === 0) {
+      setScaleWarning({
+        title: 'Nenhum colaborador elegivel',
+        messages: ['Nao ha linhas visiveis que correspondam ao filtro escolhido para a operacao em lote.'],
+      })
+      return
+    }
+
+    if (scaleBatchModal.selectedDates.length === 0) {
+      setScaleWarning({
+        title: 'Dias nao selecionados',
+        messages: ['Selecione ao menos um dia da semana para aplicar a operacao em lote.'],
+      })
+      return
+    }
+
+    const numericScheduleId = Number(scaleBatchModal.scheduleIdValue)
+    const hasScheduleSelection = !Number.isNaN(numericScheduleId) && numericScheduleId > 0
+    let nextId = scaleAssignments.reduce((max, item) => Math.max(max, item.id), 0)
+    const nextAssignments = [...scaleAssignments]
+
+    targetRows.forEach((collaborator) => {
+      scaleBatchModal.selectedDates.forEach((date) => {
+        const currentIndex = nextAssignments.findIndex(
+          (item) =>
+            item.companyId === currentCompanyId &&
+            item.collaboratorId === collaborator.id &&
+            item.date === date,
+        )
+
+        if (currentIndex >= 0 && !scaleBatchModal.overwriteExisting) {
+          return
+        }
+
+        if (currentIndex >= 0) {
+          nextAssignments.splice(currentIndex, 1)
+        }
+
+        if (!hasScheduleSelection) {
+          return
+        }
+
+        nextId += 1
+        nextAssignments.push({
+          id: nextId,
+          companyId: currentCompanyId,
+          collaboratorId: collaborator.id,
+          date,
+          scheduleId: numericScheduleId,
+        })
+      })
+    })
+
+    const issues = targetRows.flatMap((collaborator) => validateScaleRow(collaborator, weekDates, nextAssignments.filter((item) => item.companyId === currentCompanyId)).issues)
+    const uniqueIssues = Array.from(new Set(issues))
+
+    if (uniqueIssues.length > 0 && !allowIrregular) {
+      pendingScaleBatchRef.current = () => applyScaleBatch(true)
+      setScaleBatchWarning({
+        title: 'Operacao em lote com irregularidades',
+        messages: uniqueIssues,
+        confirmLabel: 'Aplicar mesmo assim',
+      })
+      return
+    }
+
+    setScaleAssignments(nextAssignments)
+    closeScaleBatchModal()
+
+    if (currentSessionActor) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Escala',
+        action: 'Atualizacao',
+        targetType: 'Escala',
+        targetLabel: `operacao em lote ${scaleBatchModal.weekStart}`,
+        severity: uniqueIssues.length > 0 ? 'warning' : 'info',
+        impactSummary:
+          uniqueIssues.length > 0
+            ? 'Operacao em lote na escala executada com alerta de irregularidade.'
+            : 'Operacao em lote na escala executada com sucesso.',
+        relatedCompanyIds: [currentCompanyId],
+      })
+    }
+
+    setScaleWarning({
+      title: 'Operacao em lote concluida',
+      messages: uniqueIssues.length > 0
+        ? uniqueIssues
+        : [
+            `${targetRows.length} colaborador(es) afetado(s) em ${scaleBatchModal.selectedDates.length} dia(s).`,
+            hasScheduleSelection ? 'Horario aplicado em lote.' : 'Folgas aplicadas em lote.',
+          ],
+    })
+  }
+
+  function submitScaleBatch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    applyScaleBatch(false)
+  }
+
   function handleScalePrint() {
     if (typeof window === 'undefined') {
       return
     }
 
-    const originalTitle = document.title
-    const companyName = slugifyFilePart(currentCompany?.tradeName ?? 'empresa')
-    const referencePeriod =
-      scaleViewMode === 'month'
-        ? scaleMonth
-        : `${toIsoDate(scaleWeeks[0]?.[0] ?? new Date())}_a_${toIsoDate(scaleWeeks[0]?.[6] ?? new Date())}`
-
-    document.title = `escala-${companyName}-${referencePeriod}`
     window.print()
-    window.setTimeout(() => {
-      document.title = originalTitle
-    }, 0)
   }
 
   function populateCompanyForm(company: CompanyRecord) {
@@ -3400,7 +4291,7 @@ function App() {
 
     if (mode === 'create') {
       const newCompany: CompanyRecord = {
-        id: Date.now(),
+        id: getNextNumericId(companies),
         status: 'ATIVA',
         collectiveAgreementId,
         suggestedCollectiveAgreementId,
@@ -3607,7 +4498,7 @@ function App() {
     }
 
     const newAgreement: CollectiveAgreementRecord = {
-      id: editingAgreementId ?? Date.now(),
+      id: editingAgreementId ?? getNextNumericId(agreements),
       name: agreementForm.name.trim(),
       employerUnion: agreementForm.employerUnion.trim(),
       employeeUnion: agreementForm.employeeUnion.trim(),
@@ -3653,7 +4544,11 @@ function App() {
   function handleFunctionSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
+    const validationMessages: string[] = []
+
     if (!currentCompanyId) {
+      validationMessages.push('Selecione uma empresa antes de cadastrar funcoes.')
+      setFunctionWarning(buildInvalidFunctionWarning(validationMessages))
       return
     }
 
@@ -3661,7 +4556,7 @@ function App() {
     const existingFunction = functions.find((item) => item.id === editingFunctionId) ?? null
 
     const newItem: FunctionRecord = {
-      id: editingFunctionId ?? Date.now(),
+      id: editingFunctionId ?? getNextNumericId(functions),
       companyId: currentCompanyId,
       name: functionForm.name.trim(),
       sector: resolvedSector,
@@ -3673,10 +4568,34 @@ function App() {
       inactivePeriods: existingFunction?.inactivePeriods ?? [],
     }
 
-    if (!newItem.name || !newItem.sector || !newItem.description) {
+    if (!newItem.name) {
+      validationMessages.push('Informe o nome da funcao.')
+    }
+
+    if (!newItem.sector) {
+      validationMessages.push('Informe o setor da funcao.')
+    }
+
+    if (!newItem.description) {
+      validationMessages.push('Informe o descritivo da funcao.')
+    }
+
+    const duplicatedFunction = functions.find(
+      (item) =>
+        item.id !== editingFunctionId &&
+        item.companyId === currentCompanyId &&
+        item.name.trim().toLowerCase() === newItem.name.toLowerCase(),
+    )
+    if (duplicatedFunction) {
+      validationMessages.push('Ja existe uma funcao cadastrada nesta empresa com esse nome.')
+    }
+
+    if (validationMessages.length > 0) {
+      setFunctionWarning(buildInvalidFunctionWarning(validationMessages))
       return
     }
 
+    setFunctionWarning(null)
     ensureCompanySector(currentCompanyId, newItem.sector)
     setFunctions((current) =>
       editingFunctionId === null
@@ -3763,7 +4682,11 @@ function App() {
   function handleCollaboratorSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
+    const validationMessages: string[] = []
+
     if (!currentCompanyId) {
+      validationMessages.push('Selecione uma empresa antes de cadastrar colaboradores.')
+      setCollaboratorWarning(buildInvalidCollaboratorWarning(validationMessages))
       return
     }
 
@@ -3773,15 +4696,28 @@ function App() {
         : collaboratorForm.functions.slice(0, 1)
 
     const cpfDigits = collaboratorForm.cpf.replace(/\D/g, '')
-    if (
-      cpfDigits.length !== 11 ||
-      !collaboratorForm.fullName.trim() ||
-      normalizedFunctions.length === 0 ||
-      (normalizedFunctions.length > 1 && !collaboratorForm.primaryFunction)
-    ) {
+    if (cpfDigits.length !== 11) {
+      validationMessages.push('Informe um CPF completo com 11 digitos.')
+    }
+
+    if (!collaboratorForm.fullName.trim()) {
+      validationMessages.push('Informe o nome completo do colaborador.')
+    }
+
+    if (normalizedFunctions.length === 0) {
+      validationMessages.push('Selecione ao menos uma funcao para o colaborador.')
+    }
+
+    if (normalizedFunctions.length > 1 && !collaboratorForm.primaryFunction) {
+      validationMessages.push('Defina a funcao principal quando houver mais de uma funcao selecionada.')
+    }
+
+    if (validationMessages.length > 0) {
+      setCollaboratorWarning(buildInvalidCollaboratorWarning(validationMessages))
       return
     }
 
+    setCollaboratorWarning(null)
     const primaryFunction =
       normalizedFunctions.length === 1
         ? normalizedFunctions[0]
@@ -3854,14 +4790,18 @@ function App() {
     event.preventDefault()
 
     const validation = validateSchedule(scheduleForm, currentCompany, currentAgreement)
-    if (!validation.valid || !currentCompanyId) {
+    if (!currentCompanyId) {
       setScheduleFeedback(validation)
-      if (!validation.valid) {
-        setScaleWarning(buildInvalidScheduleWarning([...validation.errors, ...validation.notes]))
-      }
+      setScaleWarning(buildInvalidScheduleWarning(['Selecione uma empresa antes de cadastrar horarios.']))
       return
     }
 
+    const currentEditingSchedule = schedules.find((item) => item.id === editingScheduleId) ?? null
+    const suggestedAbbreviation = buildUniqueScheduleAbbreviation(
+      scheduleForm.shiftName,
+      companySchedules.map((item) => item.abbreviation),
+      currentEditingSchedule?.abbreviation,
+    )
     const duplicateSchedule = companySchedules.find(
       (item) =>
         item.id !== editingScheduleId &&
@@ -3883,18 +4823,43 @@ function App() {
       return
     }
 
+    if (!validation.valid) {
+      setScheduleFeedback(validation)
+      if (validation.canOverride) {
+        pendingScheduleOverrideRef.current = () =>
+          persistScheduleRecord(currentCompanyId, validation, suggestedAbbreviation)
+        setScheduleWarning({
+          title: 'Horario fora da CCT',
+          messages: [...validation.errors, ...validation.notes],
+          confirmLabel: editingScheduleId === null ? 'Cadastrar mesmo assim' : 'Salvar mesmo assim',
+        })
+      } else {
+        pendingScheduleOverrideRef.current = null
+        setScaleWarning(buildInvalidScheduleWarning([...validation.errors, ...validation.notes]))
+      }
+      return
+    }
+
+    persistScheduleRecord(currentCompanyId, validation, suggestedAbbreviation)
+  }
+
+  function persistScheduleRecord(
+    companyId: number,
+    validation: ValidationResult,
+    abbreviation: string,
+  ) {
     const nextScheduleId =
       editingScheduleId ?? schedules.reduce((max, item) => Math.max(max, item.id), 0) + 1
 
     const newItem: ScheduleRecord = {
       id: nextScheduleId,
-      companyId: currentCompanyId,
+      companyId,
       isActive:
         schedules.find((item) => item.id === editingScheduleId)?.isActive ?? true,
       inactivePeriods:
         schedules.find((item) => item.id === editingScheduleId)?.inactivePeriods ?? [],
       shiftName: scheduleForm.shiftName.trim(),
-      abbreviation: normalizeAbbreviation(scheduleForm.shiftName),
+      abbreviation,
       startTime: scheduleForm.startTime,
       startPeriod: scheduleForm.startPeriod,
       breakStart: scheduleForm.breakStart,
@@ -3907,6 +4872,8 @@ function App() {
       validationMessage: validation.notes.join(' '),
     }
 
+    pendingScheduleOverrideRef.current = null
+    setScheduleWarning(null)
     setSchedules((current) =>
       editingScheduleId === null
         ? [newItem, ...current]
@@ -3917,6 +4884,18 @@ function App() {
     )
     setScheduleForm(emptyScheduleForm)
     setEditingScheduleId(null)
+  }
+
+  function closeScheduleWarning() {
+    pendingScheduleOverrideRef.current = null
+    setScheduleWarning(null)
+  }
+
+  function confirmScheduleWarning() {
+    const pendingAction = pendingScheduleOverrideRef.current
+    pendingScheduleOverrideRef.current = null
+    setScheduleWarning(null)
+    pendingAction?.()
   }
 
   function editSchedule(scheduleId: number) {
@@ -4445,7 +5424,7 @@ function App() {
       normalizeAuditLogs([
         {
           ...entry,
-          id: Date.now() + Math.floor(Math.random() * 1000),
+          id: getNextNumericId(current),
           createdAt: new Date().toISOString(),
         },
         ...current,
@@ -4473,8 +5452,8 @@ function App() {
     })
   }
 
-  function buildAppStateSnapshot(): AppStateSnapshot {
-    return {
+  const appStateSnapshot = useMemo<AppStateSnapshot>(
+    () => ({
       version: appStateVersion,
       companies,
       agreements,
@@ -4488,8 +5467,22 @@ function App() {
       scaleExtraRoster,
       users,
       auditLogs,
-    }
-  }
+    }),
+    [
+      agreements,
+      auditLogs,
+      collaboratorProfiles,
+      collaborators,
+      companies,
+      functions,
+      scaleAssignments,
+      scaleComments,
+      scaleExtraRoster,
+      schedules,
+      sectors,
+      users,
+    ],
+  )
 
   function applyAppStateSnapshot(snapshot: AppStateSnapshot) {
     const normalizedState = normalizePersistedState(snapshot)
@@ -4636,14 +5629,13 @@ function App() {
       window.clearTimeout(remoteSyncTimeoutRef.current)
     }
 
-    const snapshot = buildAppStateSnapshot()
     remoteSyncTimeoutRef.current = window.setTimeout(() => {
       void fetch(`${apiBaseUrl}/state`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(snapshot),
+        body: JSON.stringify(appStateSnapshot),
       }).catch(() => {
         setPersistenceMode('local')
       })
@@ -4668,6 +5660,7 @@ function App() {
     schedules,
     sectors,
     users,
+    appStateSnapshot,
   ])
 
   useEffect(() => {
@@ -4946,8 +5939,10 @@ function App() {
     })
 
     if (refreshedMemberships.length === 0) {
-      setSession(null)
-      setCurrentCompanyId(null)
+      startTransition(() => {
+        setSession(null)
+        setCurrentCompanyId(null)
+      })
       return
     }
 
@@ -4957,8 +5952,10 @@ function App() {
         : refreshedMemberships.find((item) => item.companyId === currentCompanyId) ?? refreshedMemberships[0]
 
     if (!nextActiveUser) {
-      setSession(null)
-      setCurrentCompanyId(null)
+      startTransition(() => {
+        setSession(null)
+        setCurrentCompanyId(null)
+      })
       return
     }
 
@@ -4966,39 +5963,49 @@ function App() {
       !areMembershipListsEqual(session.memberships, refreshedMemberships) ||
       nextActiveUser.id !== session.user.id
     ) {
-      setSession({
-        kind: 'companyUser',
-        user: nextActiveUser,
-        memberships: refreshedMemberships,
+      startTransition(() => {
+        setSession({
+          kind: 'companyUser',
+          user: nextActiveUser,
+          memberships: refreshedMemberships,
+        })
       })
     }
 
     if (currentCompanyId !== null && nextActiveUser.companyId !== currentCompanyId) {
       const nextCompany = companies.find((item) => item.id === nextActiveUser.companyId) ?? null
-      setCurrentCompanyId(nextActiveUser.companyId)
-      if (nextCompany) {
-        populateCompanyForm(nextCompany)
-      }
+      startTransition(() => {
+        setCurrentCompanyId(nextActiveUser.companyId)
+        if (nextCompany) {
+          populateCompanyForm(nextCompany)
+        }
+      })
     }
   }, [companies, currentCompanyId, session, users])
 
   useEffect(() => {
     if (companyAgreementSuggestion && !companyForm.collectiveAgreementId) {
-      setCompanyForm((current) => ({
-        ...current,
-        collectiveAgreementId: String(companyAgreementSuggestion.id),
-      }))
+      startTransition(() => {
+        setCompanyForm((current) => ({
+          ...current,
+          collectiveAgreementId: String(companyAgreementSuggestion.id),
+        }))
+      })
     }
   }, [companyAgreementSuggestion, companyForm.collectiveAgreementId])
 
   useEffect(() => {
     if (activeSection === 'PainelMaster' && !isSystemAdmin) {
-      setActiveSection(visibleAppSections[0] ?? 'Escala')
+      startTransition(() => {
+        setActiveSection(visibleAppSections[0] ?? 'Escala')
+      })
       return
     }
 
     if (activeSection !== 'PainelMaster' && !visibleAppSections.includes(activeSection)) {
-      setActiveSection(visibleAppSections[0] ?? 'Escala')
+      startTransition(() => {
+        setActiveSection(visibleAppSections[0] ?? 'Escala')
+      })
     }
   }, [activeSection, isSystemAdmin, visibleAppSections])
 
@@ -6460,16 +7467,18 @@ function App() {
 
             <form className="form-grid" onSubmit={handleCollaboratorSubmit}>
               <label>
-                CPF
+                CPF <span className="required-marker">*</span>
                 <input
+                  required
                   placeholder="000.000.000-00"
                   value={collaboratorForm.cpf}
                   onChange={(event) => changeCollaboratorCpf(event.target.value)}
                 />
               </label>
               <label>
-                Nome completo
+                Nome completo <span className="required-marker">*</span>
                 <input
+                  required
                   value={collaboratorForm.fullName}
                   onChange={(event) =>
                     setCollaboratorForm({ ...collaboratorForm, fullName: event.target.value })
@@ -6519,7 +7528,7 @@ function App() {
 
               <div className="field-span">
                 <div className="field-heading">
-                  <span className="field-title">Funcao</span>
+                  <span className="field-title">Funcao <span className="required-marker">*</span></span>
                   <span className="field-helper">
                     Selecionadas: {selectedFunctions.length}/{activeFunctionLimit}
                   </span>
@@ -6559,8 +7568,9 @@ function App() {
 
               {selectedFunctions.length > 1 && (
                 <label className="field-span">
-                  Funcao principal nesta empresa
+                  Funcao principal nesta empresa <span className="required-marker">*</span>
                   <select
+                    required
                     value={collaboratorForm.primaryFunction}
                     onChange={(event) =>
                       setCollaboratorForm({
@@ -6586,63 +7596,48 @@ function App() {
               </div>
             </form>
 
-            <div className="table-list">
-              {companyCollaborators.map((item) => (
-                <article key={item.id} className="list-row user-list-row">
-                  <div className="user-row-header">
-                    <div className="user-title-group">
-                      <strong>
-                        {collaboratorProfiles.find((profile) => profile.cpf === item.cpf)?.fullName ?? item.cpf}
-                      </strong>
-                      <span className={item.isActive ? 'status-pill status-active' : 'status-pill status-inactive'}>
-                        {item.isActive ? 'Ativo' : 'Inativo'}
-                      </span>
-                    </div>
-                    <div className="row-actions">
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        onClick={() => editCollaborator(item.id)}
-                      >
-                        Editar
-                      </button>
-                      {canManageCollaboratorActivation ? (
-                        <button
-                          type="button"
-                          className={item.isActive ? 'warning-button' : 'secondary-button'}
-                          onClick={() => toggleCollaboratorActivation(item.id)}
-                        >
-                          {item.isActive ? 'Inativar' : 'Ativar'}
-                        </button>
-                      ) : null}
-                      {isSystemAdmin ? (
-                        <button
-                          type="button"
-                          className="danger-button"
-                          onClick={() => deleteCollaborator(item.id)}
-                        >
-                          Excluir
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-                  <div className="row-meta user-row-meta">
-                    <div className="user-meta-line">
-                      <span><strong className="meta-label">CPF:</strong> {item.cpf}</span>
-                      <span><strong className="meta-label">Vinculo:</strong> {item.employmentType}</span>
-                      <span><strong className="meta-label">Funcoes:</strong> {item.functions.join(', ')}</span>
-                      <span><strong className="meta-label">Principal:</strong> {item.primaryFunction}</span>
-                      <span>
-                        <strong className="meta-label">Contato:</strong> {collaboratorProfiles.find((profile) => profile.cpf === item.cpf)?.contact ?? 'Contato pendente'}
-                      </span>
-                      <span>
-                        <strong className="meta-label">PIX:</strong> {collaboratorProfiles.find((profile) => profile.cpf === item.cpf)?.pixKey ?? 'PIX pendente'}
-                      </span>
-                    </div>
-                  </div>
-                </article>
-              ))}
-            </div>
+            <p className="field-helper">Campos marcados com <span className="required-marker">*</span> sao obrigatorios.</p>
+
+            <EntityListTable
+              title="Colaboradores"
+              rows={companyCollaborators}
+              columns={collaboratorListColumns}
+              searchTerm={collaboratorListSearch}
+              onSearchTermChange={setCollaboratorListSearch}
+              columnOrder={collaboratorListColumnOrder}
+              onColumnOrderChange={setCollaboratorListColumnOrder}
+              emptyMessage="Nenhum colaborador cadastrado ainda para esta empresa."
+              exportFileName={`colaboradores-${slugifyFilePart(currentCompany?.tradeName ?? 'empresa')}.xlsx`}
+              renderActions={(item) => (
+                <div className="table-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => editCollaborator(item.id)}
+                  >
+                    Editar
+                  </button>
+                  {canManageCollaboratorActivation ? (
+                    <button
+                      type="button"
+                      className={item.isActive ? 'warning-button' : 'secondary-button'}
+                      onClick={() => toggleCollaboratorActivation(item.id)}
+                    >
+                      {item.isActive ? 'Inativar' : 'Ativar'}
+                    </button>
+                  ) : null}
+                  {isSystemAdmin ? (
+                    <button
+                      type="button"
+                      className="danger-button"
+                      onClick={() => deleteCollaborator(item.id)}
+                    >
+                      Excluir
+                    </button>
+                  ) : null}
+                </div>
+              )}
+            />
           </section>
         )}
 
@@ -6659,15 +7654,17 @@ function App() {
             </div>
             <form className="form-grid" onSubmit={handleFunctionSubmit}>
               <label>
-                Funcao
+                Funcao <span className="required-marker">*</span>
                 <input
+                  required
                   value={functionForm.name}
                   onChange={(event) => setFunctionForm({ ...functionForm, name: event.target.value })}
                 />
               </label>
               <label>
-                Setor
+                Setor <span className="required-marker">*</span>
                 <input
+                  required
                   list="company-sector-options-main"
                   placeholder="Selecione ou digite um novo setor"
                   value={functionForm.sector}
@@ -6703,8 +7700,9 @@ function App() {
                 />
               </label>
               <label className="field-span">
-                Descritivo
+                Descritivo <span className="required-marker">*</span>
                 <textarea
+                  required
                   rows={5}
                   value={functionForm.description}
                   onChange={(event) =>
@@ -6725,59 +7723,46 @@ function App() {
               ))}
             </datalist>
 
-            <div className="table-list">
-              {companyFunctions.map((item) => (
-                <article key={item.id} className="list-row user-list-row">
-                  <div className="user-row-header">
-                    <div className="user-title-group">
-                      <strong>{item.name}</strong>
-                      <span className={item.isActive ? 'status-pill status-active' : 'status-pill status-inactive'}>
-                        {item.isActive ? 'Ativa' : 'Inativa'}
-                      </span>
-                    </div>
-                    <div className="row-actions">
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        onClick={() => editFunction(item.id)}
-                      >
-                        Editar
-                      </button>
-                      <button
-                        type="button"
-                        className={item.isActive ? 'warning-button' : 'secondary-button'}
-                        onClick={() => toggleFunctionActivation(item.id)}
-                      >
-                        {item.isActive ? 'Inativar' : 'Ativar'}
-                      </button>
-                      {(isSystemAdmin || session?.user.role === 'Gestor') ? (
-                        <button
-                          type="button"
-                          className="danger-button"
-                          onClick={() => deleteFunction(item.id)}
-                        >
-                          Excluir
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-                  <div className="row-meta user-row-meta">
-                    <div className="user-meta-line">
-                      <span><strong className="meta-label">Setor:</strong> {item.sector}</span>
-                      <span><strong className="meta-label">Salario:</strong> {formatCurrency(parseCurrencyValue(item.baseSalary || '0'))}</span>
-                      <span><strong className="meta-label">Cota:</strong> {item.serviceQuota || 'Nao informada'}</span>
-                      <span>
-                        <strong className="meta-label">Pagamento extra:</strong>{' '}
-                        {item.extraPayValue
-                          ? formatCurrency(parseCurrencyValue(item.extraPayValue))
-                          : 'Nao informado'}
-                      </span>
-                      <span><strong className="meta-label">Descricao:</strong> {item.description}</span>
-                    </div>
-                  </div>
-                </article>
-              ))}
-            </div>
+            <p className="field-helper">Campos marcados com <span className="required-marker">*</span> sao obrigatorios.</p>
+
+            <EntityListTable
+              title="Funcoes"
+              rows={companyFunctions}
+              columns={functionListColumns}
+              searchTerm={functionListSearch}
+              onSearchTermChange={setFunctionListSearch}
+              columnOrder={functionListColumnOrder}
+              onColumnOrderChange={setFunctionListColumnOrder}
+              emptyMessage="Nenhuma funcao cadastrada ainda para esta empresa."
+              exportFileName={`funcoes-${slugifyFilePart(currentCompany?.tradeName ?? 'empresa')}.xlsx`}
+              renderActions={(item) => (
+                <div className="table-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => editFunction(item.id)}
+                  >
+                    Editar
+                  </button>
+                  <button
+                    type="button"
+                    className={item.isActive ? 'warning-button' : 'secondary-button'}
+                    onClick={() => toggleFunctionActivation(item.id)}
+                  >
+                    {item.isActive ? 'Inativar' : 'Ativar'}
+                  </button>
+                  {(isSystemAdmin || session?.user.role === 'Gestor') ? (
+                    <button
+                      type="button"
+                      className="danger-button"
+                      onClick={() => deleteFunction(item.id)}
+                    >
+                      Excluir
+                    </button>
+                  ) : null}
+                </div>
+              )}
+            />
           </section>
         )}
 
@@ -6795,8 +7780,9 @@ function App() {
 
             <form className="form-grid schedule-form" onSubmit={handleScheduleSubmit}>
                 <label>
-                  Turno
+                  Turno <span className="required-marker">*</span>
                   <input
+                    required
                     placeholder="Ex.: Almoco executivo"
                     value={scheduleForm.shiftName}
                     onChange={(event) =>
@@ -6806,12 +7792,13 @@ function App() {
                 </label>
                 <label>
                   Abreviacao
-                  <input value={normalizeAbbreviation(scheduleForm.shiftName)} readOnly />
+                  <input value={liveScheduleAbbreviation} readOnly />
                 </label>
                 <label className="time-row">
-                  Horario de inicio
+                  Horario de inicio <span className="required-marker">*</span>
                   <div className="time-control">
                     <input
+                      required
                       placeholder="0000"
                       inputMode="numeric"
                       maxLength={5}
@@ -6872,6 +7859,7 @@ function App() {
                       <option value="PM">PM</option>
                     </select>
                   </div>
+                  <small>Opcional. Se informar pausa, preencha inicio e fim.</small>
                 </label>
                 <label className="time-row">
                   Fim de pausa
@@ -6906,11 +7894,13 @@ function App() {
                       <option value="PM">PM</option>
                     </select>
                   </div>
+                  <small>Deixe os dois campos de pausa vazios para jornadas sem intervalo.</small>
                 </label>
                 <label className="time-row">
-                  Fim do turno
+                  Fim do turno <span className="required-marker">*</span>
                   <div className="time-control">
                     <input
+                      required
                       placeholder="0000"
                       inputMode="numeric"
                       maxLength={5}
@@ -6949,7 +7939,9 @@ function App() {
                     ))}
                   </ul>
                 ) : (
-                  <small>Preencha os quatro horarios para liberar o calculo da jornada liquida.</small>
+                  <small>
+                    Preencha inicio e fim do turno. A pausa e opcional e, quando usada, precisa ter inicio e fim.
+                  </small>
                 )}
               </div>
 
@@ -6980,6 +7972,8 @@ function App() {
               )}
             </form>
 
+            <p className="field-helper">Campos marcados com <span className="required-marker">*</span> sao obrigatorios.</p>
+
             <div className="rules-grid">
               <div className="legal-banner warning">
                 <strong>Regras aplicadas neste cadastro</strong>
@@ -6993,11 +7987,13 @@ function App() {
               <div className="legal-banner">
                 <strong>Boas praticas de preenchimento</strong>
                 <ul>
-                  <li>Use nomes de turno curtos e distintos. A abreviacao sempre sera gerada com 3 letras.</li>
+                  <li>Use nomes de turno curtos e distintos. A abreviacao sugerida tenta resumir o nome inteiro sem repetir siglas da empresa.</li>
+                  <li>A abreviacao sugerida considera o nome completo do turno e nunca repete uma sigla ja cadastrada.</li>
                   <li>Digite sempre 4 numeros por horario, sem pontuacao. O app aplica a mascara hh:mm.</li>
                   <li>Ao completar 4 numeros, o sistema identifica automaticamente AM ou PM e ajusta o horario exibido no campo.</li>
                   <li>AM cobre horarios entre 00:01 e 12:00. PM cobre horarios entre 12:01 e 24:00.</li>
                   <li>Preencha os horarios em sequencia cronologica para reduzir erro operacional.</li>
+                  <li>Para jornadas curtas sem intervalo, deixe ambos os campos de pausa em branco.</li>
                   <li>Valide primeiro o turno padrao da casa e depois cadastre variacoes.</li>
                 </ul>
               </div>
@@ -7042,69 +8038,42 @@ function App() {
               </p>
             </div>
 
-            {companySchedules.length === 0 ? (
-              <div className="empty-state">
-                Nenhum horario cadastrado ainda para esta empresa.
-              </div>
-            ) : (
-              <div className="table-list">
-                {companySchedules.map((item) => (
-                  <article key={item.id} className="list-row">
-                    <div className="schedule-summary">
-                      <div className="schedule-summary-header">
-                        <strong>
-                          {item.shiftName} ({item.abbreviation})
-                        </strong>
-                        <span className={item.isActive ? 'status-pill status-active' : 'status-pill status-inactive'}>
-                          {item.isActive ? 'Ativo' : 'Inativo'}
-                        </span>
-                      </div>
-                      <div className="schedule-summary-times">
-                        <p className="schedule-summary-line">
-                          Entrada: {item.startTime} {item.startPeriod} | Pausa: {item.breakStart}{' '}
-                          {item.breakStartPeriod}
-                        </p>
-                        <p className="schedule-summary-line">
-                          Retorno: {item.breakEnd} {item.breakEndPeriod} | Saida: {item.endTime}{' '}
-                          {item.endPeriod}
-                        </p>
-                        <p className="schedule-summary-line">
-                          Horas trabalhadas: {formatWorkedHours(item.netMinutes)}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="row-meta">
-                      <div className="row-actions">
-                        <button
-                          type="button"
-                          className="secondary-button"
-                          onClick={() => editSchedule(item.id)}
-                        >
-                          Editar
-                        </button>
-                        <button
-                          type="button"
-                          className={item.isActive ? 'warning-button' : 'secondary-button'}
-                          onClick={() => toggleScheduleActivation(item.id)}
-                        >
-                          {item.isActive ? 'Inativar' : 'Ativar'}
-                        </button>
-                        <button
-                          type="button"
-                          className="danger-button"
-                          onClick={() => deleteSchedule(item.id)}
-                        >
-                          Excluir
-                        </button>
-                      </div>
-                      <div className="schedule-validation">
-                        <span>{item.validationMessage}</span>
-                      </div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
+            <EntityListTable
+              title="Horarios"
+              rows={companySchedules}
+              columns={scheduleListColumns}
+              searchTerm={scheduleListSearch}
+              onSearchTermChange={setScheduleListSearch}
+              columnOrder={scheduleListColumnOrder}
+              onColumnOrderChange={setScheduleListColumnOrder}
+              emptyMessage="Nenhum horario cadastrado ainda para esta empresa."
+              exportFileName={`horarios-${slugifyFilePart(currentCompany?.tradeName ?? 'empresa')}.xlsx`}
+              renderActions={(item) => (
+                <div className="table-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => editSchedule(item.id)}
+                  >
+                    Editar
+                  </button>
+                  <button
+                    type="button"
+                    className={item.isActive ? 'warning-button' : 'secondary-button'}
+                    onClick={() => toggleScheduleActivation(item.id)}
+                  >
+                    {item.isActive ? 'Inativar' : 'Ativar'}
+                  </button>
+                  <button
+                    type="button"
+                    className="danger-button"
+                    onClick={() => deleteSchedule(item.id)}
+                  >
+                    Excluir
+                  </button>
+                </div>
+              )}
+            />
 
           </section>
         )}
@@ -7192,6 +8161,36 @@ function App() {
                       ))}
                     </select>
                   </label>
+                  <label>
+                    Funcao
+                    <select
+                      value={effectiveScaleFunctionFilter}
+                      onChange={(event) => setScaleFunctionFilter(event.target.value)}
+                    >
+                      {scaleFunctionOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Buscar colaborador
+                    <input
+                      type="search"
+                      value={scaleSearch}
+                      onChange={(event) => setScaleSearch(event.target.value)}
+                      placeholder="Nome, CPF, funcao ou vinculo"
+                    />
+                  </label>
+                  <label className="toggle-field">
+                    <span>Mostrar apenas linhas com irregularidade</span>
+                    <input
+                      type="checkbox"
+                      checked={scaleShowIrregularOnly}
+                      onChange={(event) => setScaleShowIrregularOnly(event.target.checked)}
+                    />
+                  </label>
                   <div className="scale-toolbar-actions">
                     <button
                       type="button"
@@ -7245,22 +8244,16 @@ function App() {
                   {scaleWeeks.map((weekDates) => {
                     const weekStartValue = toIsoDate(weekDates[0])
                     const monthReference = scaleViewMode === 'month' ? scaleMonth : weekStartValue.slice(0, 7)
-                    const autoRows = visibleScaleCollaborators.filter((item) => {
-                      if (item.employmentType === 'EXTRA') {
-                        return false
-                      }
-
-                      return weekDates.some((date) => isCollaboratorActiveOnDate(item, toIsoDate(date)))
-                    })
-                    const extraRows = companyScaleExtraRoster
-                      .filter((item) => item.weekStart === weekStartValue)
-                      .map((item) => visibleScaleCollaborators.find((collaborator) => collaborator.id === item.collaboratorId) ?? null)
-                      .filter(
-                        (item): item is CollaboratorRecord =>
-                          item !== null &&
-                          weekDates.some((date) => isCollaboratorActiveOnDate(item, toIsoDate(date))),
-                      )
-                    const weekRows = [...autoRows, ...extraRows]
+                    const weekRows = getVisibleWeekRows(weekDates)
+                    const irregularWeekRows = weekRows.filter(
+                      (item) => validateScaleRow(item, weekDates).issues.length > 0,
+                    )
+                    const emptyAssignmentSlots = weekRows.reduce((sum, collaborator) => {
+                      const unfilledDays = weekDates.filter(
+                        (date) => !getAssignmentForDay(collaborator.id, toIsoDate(date)),
+                      ).length
+                      return sum + unfilledDays
+                    }, 0)
                     const dayExtraCosts = weekDates.map((date) => {
                       const isoDate = toIsoDate(date)
                       return weekRows.reduce((sum, collaborator) => {
@@ -7287,6 +8280,18 @@ function App() {
                           </div>
                           <div className="scale-week-meta">
                             <span>{weekRows.length} linhas visiveis</span>
+                            <span>{irregularWeekRows.length} com irregularidade</span>
+                            <span>{emptyAssignmentSlots} celulas sem escala</span>
+                            <span>{formatCurrency(dayExtraCosts.reduce((sum, value) => sum + value, 0))} em extras</span>
+                            {canEditScale ? (
+                              <button
+                                type="button"
+                                className="secondary-button"
+                                onClick={() => openScaleBatchModal(weekDates)}
+                              >
+                                Operacao em lote
+                              </button>
+                            ) : null}
                           </div>
                         </div>
 
@@ -7489,19 +8494,32 @@ function App() {
                                                                   profile?.fullName ?? collaborator.cpf
                                                                 )}
                                                               </strong>
-                                                              {collaborator.employmentType === 'EXTRA' && canEditScale ? (
-                                                                <button
-                                                                  type="button"
-                                                                  className="scale-remove-extra"
-                                                                  aria-label="Remover colaborador extra"
-                                                                  title="Remover EXTRA desta semana"
-                                                                  onClick={() =>
-                                                                    removeExtraFromWeek(weekStartValue, collaborator.id)
-                                                                  }
-                                                                >
-                                                                  x
-                                                                </button>
-                                                              ) : null}
+                                                              <div className="scale-person-actions no-print">
+                                                                {canEditScale ? (
+                                                                  <button
+                                                                    type="button"
+                                                                    className="ghost-button scale-replicate-button"
+                                                                    onClick={() =>
+                                                                      openScaleReplicationModal(collaborator.id, weekDates)
+                                                                    }
+                                                                  >
+                                                                    Replicar
+                                                                  </button>
+                                                                ) : null}
+                                                                {collaborator.employmentType === 'EXTRA' && canEditScale ? (
+                                                                  <button
+                                                                    type="button"
+                                                                    className="scale-remove-extra"
+                                                                    aria-label="Remover colaborador extra"
+                                                                    title="Remover EXTRA desta semana"
+                                                                    onClick={() =>
+                                                                      removeExtraFromWeek(weekStartValue, collaborator.id)
+                                                                    }
+                                                                  >
+                                                                    x
+                                                                  </button>
+                                                                ) : null}
+                                                              </div>
                                                             </div>
                                                             {hasIssues ? <small>{rowValidation.issues[0]}</small> : null}
                                                           </div>
@@ -8237,7 +9255,7 @@ function App() {
       </main>
 
       {scheduleWarning && (
-        <div className="modal-backdrop" role="presentation" onClick={() => setScheduleWarning(null)}>
+        <div className="modal-backdrop" role="presentation" onClick={closeScheduleWarning}>
           <section
             className="modal-card"
             role="dialog"
@@ -8250,15 +9268,92 @@ function App() {
                 <p className="eyebrow">Validacao de horario</p>
                 <h2 id="schedule-warning-title">{scheduleWarning.title}</h2>
               </div>
-              <button type="button" className="ghost-button" onClick={() => setScheduleWarning(null)}>
+              <button type="button" className="ghost-button" onClick={closeScheduleWarning}>
+                Fechar
+              </button>
+            </div>
+
+            <div className={`feedback ${scheduleWarning.confirmLabel ? 'warning' : 'error'}`}>
+              <strong>
+                {scheduleWarning.confirmLabel
+                  ? 'O horario infringe a regra atual e precisa de confirmacao.'
+                  : 'O horario nao pode ser cadastrado.'}
+              </strong>
+              <ul>
+                {scheduleWarning.messages.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            </div>
+
+            {scheduleWarning.confirmLabel ? (
+              <div className="form-actions">
+                <button type="button" className="secondary-button" onClick={closeScheduleWarning}>
+                  Revisar horario
+                </button>
+                <button type="button" className="primary-button" onClick={confirmScheduleWarning}>
+                  {scheduleWarning.confirmLabel}
+                </button>
+              </div>
+            ) : null}
+          </section>
+        </div>
+      )}
+
+      {collaboratorWarning && (
+        <div className="modal-backdrop" role="presentation" onClick={() => setCollaboratorWarning(null)}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="collaborator-warning-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Validacao de colaborador</p>
+                <h2 id="collaborator-warning-title">{collaboratorWarning.title}</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={() => setCollaboratorWarning(null)}>
                 Fechar
               </button>
             </div>
 
             <div className="feedback error">
-              <strong>O horario nao pode ser cadastrado.</strong>
+              <strong>O colaborador nao pode ser salvo enquanto houver pendencias.</strong>
               <ul>
-                {scheduleWarning.messages.map((message) => (
+                {collaboratorWarning.messages.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {functionWarning && (
+        <div className="modal-backdrop" role="presentation" onClick={() => setFunctionWarning(null)}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="function-warning-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Validacao de funcao</p>
+                <h2 id="function-warning-title">{functionWarning.title}</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={() => setFunctionWarning(null)}>
+                Fechar
+              </button>
+            </div>
+
+            <div className="feedback error">
+              <strong>A funcao nao pode ser salva enquanto houver pendencias.</strong>
+              <ul>
+                {functionWarning.messages.map((message) => (
                   <li key={message}>{message}</li>
                 ))}
               </ul>
@@ -8479,6 +9574,454 @@ function App() {
         </div>
       )}
 
+      {scaleReplicationModal && activeScaleReplicationCollaborator && (
+        <div className="modal-backdrop" role="presentation" onClick={closeScaleReplicationModal}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="scale-replication-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Replicacao individual</p>
+                <h2 id="scale-replication-title">Replicar escala do colaborador</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={closeScaleReplicationModal}>
+                Fechar
+              </button>
+            </div>
+
+            <p className="section-note">
+              {getCollaboratorProfile(activeScaleReplicationCollaborator.cpf)?.fullName ?? activeScaleReplicationCollaborator.cpf}
+            </p>
+
+            <form className="form-grid" onSubmit={submitScaleReplication}>
+              <div className="field-span">
+                <span className="field-title">Modo de replicacao <span className="required-marker">*</span></span>
+                <div className="pill-row">
+                  <button
+                    type="button"
+                    className={scaleReplicationModal.mode === 'sequence' ? 'pill active' : 'pill'}
+                    onClick={() =>
+                      setScaleReplicationModal((current) =>
+                        current === null
+                          ? current
+                          : { ...current, mode: 'sequence' },
+                      )
+                    }
+                  >
+                    Periodo corrido
+                  </button>
+                  <button
+                    type="button"
+                    className={scaleReplicationModal.mode === 'weekly' ? 'pill active' : 'pill'}
+                    onClick={() =>
+                      setScaleReplicationModal((current) =>
+                        current === null
+                          ? current
+                          : { ...current, mode: 'weekly' },
+                      )
+                    }
+                  >
+                    Recorrencia semanal
+                  </button>
+                </div>
+              </div>
+              <label>
+                Inicio da origem <span className="required-marker">*</span>
+                <input
+                  required
+                  type="date"
+                  value={scaleReplicationModal.sourceStartDate}
+                  onChange={(event) =>
+                    setScaleReplicationModal((current) =>
+                      current === null
+                        ? current
+                        : { ...current, sourceStartDate: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Fim da origem <span className="required-marker">*</span>
+                <input
+                  required
+                  type="date"
+                  value={scaleReplicationModal.sourceEndDate}
+                  onChange={(event) =>
+                    setScaleReplicationModal((current) =>
+                      current === null
+                        ? current
+                        : { ...current, sourceEndDate: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Inicio do destino <span className="required-marker">*</span>
+                <input
+                  required
+                  type="date"
+                  value={scaleReplicationModal.targetStartDate}
+                  onChange={(event) =>
+                    setScaleReplicationModal((current) =>
+                      current === null
+                        ? current
+                        : { ...current, targetStartDate: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              {scaleReplicationModal.mode === 'weekly' ? (
+                <label>
+                  Quantidade de semanas <span className="required-marker">*</span>
+                  <input
+                    required
+                    inputMode="numeric"
+                    value={scaleReplicationModal.weeklyRepeatCount}
+                    onChange={(event) =>
+                      setScaleReplicationModal((current) =>
+                        current === null
+                          ? current
+                          : {
+                              ...current,
+                              weeklyRepeatCount: event.target.value.replace(/\D/g, ''),
+                            },
+                      )
+                    }
+                  />
+                </label>
+              ) : null}
+              <div className="field-span helper-banner">
+                {scaleReplicationModal.mode === 'weekly'
+                  ? 'A recorrencia semanal repete o bloco de origem preservando os mesmos deslocamentos de dias em cada semana.'
+                  : 'O destino sempre tera a mesma quantidade de dias do periodo de origem. O sistema replica dia a dia, na mesma sequencia.'}
+              </div>
+              <div className="field-span replication-preview-panel">
+                <strong>Previa das datas afetadas</strong>
+                <span className="field-helper">
+                  {activeScaleReplicationPreview.length} destino(s) planejado(s)
+                </span>
+                {activeScaleReplicationPreviewSummary.length > 0 ? (
+                  <div className="replication-preview-summary">
+                    {activeScaleReplicationPreviewSummary.map((item) => (
+                      <article
+                        key={item.weekStart}
+                        className={item.risk > 0 ? 'replication-summary-card irregular' : 'replication-summary-card'}
+                      >
+                        <strong>{formatWeekLabel(getWeekDates(item.weekStart))}</strong>
+                        <span>{item.total} destino(s)</span>
+                        <span>{item.fillEmpty} preenche(m) dia vazio</span>
+                        <span>{item.keepExisting} mantem dias ja preenchidos</span>
+                        <span>{item.overwrite} sobrescreve(m)</span>
+                        <span>{item.risk} com risco semanal</span>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
+                {activeScaleReplicationPreview.length > 0 ? (
+                  <div className="replication-preview-list">
+                    {activeScaleReplicationPreview.map((item) => (
+                      <article
+                        key={`${item.sourceDate}-${item.targetDate}`}
+                        className={item.hasIrregularityRisk ? 'replication-preview-row irregular' : 'replication-preview-row'}
+                      >
+                        <span>
+                          <strong>Origem:</strong> {formatDateLabel(item.sourceDate)} ({item.sourceLabel})
+                        </span>
+                        <span>
+                          <strong>Destino:</strong> {formatDateLabel(item.targetDate)} ({item.targetLabel})
+                        </span>
+                        <span>
+                          <strong>Status:</strong>{' '}
+                          {item.willOverwrite
+                            ? 'Sobrescreve horario existente'
+                            : item.alreadyFilled
+                              ? 'Mantem horario existente'
+                              : 'Preenche dia vazio'}
+                        </span>
+                        {item.hasIrregularityRisk ? (
+                          <div className="replication-preview-warning">
+                            <strong>Semana com risco:</strong> {item.irregularityMessages[0]}
+                          </div>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="field-helper">
+                    Defina um periodo de origem e um destino valido para visualizar a previa.
+                  </div>
+                )}
+              </div>
+              <label className="toggle-field field-span">
+                <span>Sobrescrever dias do destino que ja possuem horario</span>
+                <input
+                  type="checkbox"
+                  checked={scaleReplicationModal.overwriteExisting}
+                  onChange={(event) =>
+                    setScaleReplicationModal((current) =>
+                      current === null
+                        ? current
+                        : { ...current, overwriteExisting: event.target.checked },
+                    )
+                  }
+                />
+              </label>
+              <label className="toggle-field field-span">
+                <span>Replicar folgas do periodo de origem quando houver sobrescrita</span>
+                <input
+                  type="checkbox"
+                  checked={scaleReplicationModal.copyDaysOff}
+                  onChange={(event) =>
+                    setScaleReplicationModal((current) =>
+                      current === null
+                        ? current
+                        : { ...current, copyDaysOff: event.target.checked },
+                    )
+                  }
+                />
+              </label>
+              <div className="form-actions">
+                <button type="button" className="secondary-button" onClick={closeScaleReplicationModal}>
+                  Cancelar
+                </button>
+                <button type="submit" className="primary-button">
+                  Replicar periodo
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {scaleReplicationWarning && (
+        <div className="modal-backdrop" role="presentation" onClick={closeScaleReplicationWarning}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="scale-replication-warning-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Validacao da replicacao</p>
+                <h2 id="scale-replication-warning-title">{scaleReplicationWarning.title}</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={closeScaleReplicationWarning}>
+                Fechar
+              </button>
+            </div>
+
+            <div className="feedback warning">
+              <strong>A replicacao vai criar irregularidades na escala.</strong>
+              <ul>
+                {scaleReplicationWarning.messages.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={closeScaleReplicationWarning}>
+                Revisar periodo
+              </button>
+              <button type="button" className="primary-button" onClick={confirmScaleReplicationWarning}>
+                {scaleReplicationWarning.confirmLabel}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {scaleBatchModal && (
+        <div className="modal-backdrop" role="presentation" onClick={closeScaleBatchModal}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="scale-batch-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Operacao em lote</p>
+                <h2 id="scale-batch-title">Aplicar na semana visivel</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={closeScaleBatchModal}>
+                Fechar
+              </button>
+            </div>
+
+            <p className="section-note">
+              {formatWeekLabel(activeScaleBatchWeekDates.length > 0 ? activeScaleBatchWeekDates : getWeekDates(scaleBatchModal.weekStart))}
+            </p>
+
+            <form className="form-grid" onSubmit={submitScaleBatch}>
+              <label>
+                Escopo
+                <select
+                  value={scaleBatchModal.employmentScope}
+                  onChange={(event) =>
+                    setScaleBatchModal((current) =>
+                      current === null
+                        ? current
+                        : {
+                            ...current,
+                            employmentScope: event.target.value as 'TODOS' | CollaboratorEmploymentType,
+                          },
+                    )
+                  }
+                >
+                  <option value="TODOS">Todas as linhas visiveis</option>
+                  {scaleEmploymentOrder.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Horario
+                <select
+                  value={scaleBatchModal.scheduleIdValue}
+                  onChange={(event) =>
+                    setScaleBatchModal((current) =>
+                      current === null ? current : { ...current, scheduleIdValue: event.target.value },
+                    )
+                  }
+                >
+                  <option value="">Aplicar folga</option>
+                  {scaleSchedulesForSelect.map((schedule) => (
+                    <option key={schedule.id} value={schedule.id}>
+                      {schedule.shiftName} ({schedule.abbreviation})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="field-span">
+                <span className="field-title">Dias selecionados</span>
+                <div className="selector-grid">
+                  {activeScaleBatchWeekDates.map((date) => {
+                    const isoDate = toIsoDate(date)
+                    const isChecked = scaleBatchModal.selectedDates.includes(isoDate)
+
+                    return (
+                      <label key={isoDate} className="checkbox-card">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() =>
+                            setScaleBatchModal((current) => {
+                              if (current === null) {
+                                return current
+                              }
+
+                              return {
+                                ...current,
+                                selectedDates: isChecked
+                                  ? current.selectedDates.filter((item) => item !== isoDate)
+                                  : [...current.selectedDates, isoDate].sort(),
+                              }
+                            })
+                          }
+                        />
+                        <span>{formatDateLabel(isoDate)}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+              <label className="toggle-field field-span">
+                <span>Sobrescrever dias que ja possuem horario</span>
+                <input
+                  type="checkbox"
+                  checked={scaleBatchModal.overwriteExisting}
+                  onChange={(event) =>
+                    setScaleBatchModal((current) =>
+                      current === null
+                        ? current
+                        : { ...current, overwriteExisting: event.target.checked },
+                    )
+                  }
+                />
+              </label>
+              <div className="field-span replication-preview-panel">
+                <strong>Impacto previsto</strong>
+                <span className="field-helper">
+                  {activeScaleBatchRows.length} colaborador(es) no escopo atual
+                </span>
+                <div className="replication-preview-summary">
+                  <article className="replication-summary-card">
+                    <strong>Linhas alvo</strong>
+                    <span>{activeScaleBatchRows.length}</span>
+                  </article>
+                  <article className="replication-summary-card">
+                    <strong>Dias marcados</strong>
+                    <span>{scaleBatchModal.selectedDates.length}</span>
+                  </article>
+                  <article className="replication-summary-card">
+                    <strong>Acao</strong>
+                    <span>{scaleBatchModal.scheduleIdValue ? 'Aplicar horario' : 'Aplicar folga'}</span>
+                  </article>
+                </div>
+              </div>
+              <div className="form-actions">
+                <button type="button" className="secondary-button" onClick={closeScaleBatchModal}>
+                  Cancelar
+                </button>
+                <button type="submit" className="primary-button">
+                  Aplicar lote
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {scaleBatchWarning && (
+        <div className="modal-backdrop" role="presentation" onClick={closeScaleBatchWarning}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="scale-batch-warning-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Validacao da operacao em lote</p>
+                <h2 id="scale-batch-warning-title">{scaleBatchWarning.title}</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={closeScaleBatchWarning}>
+                Fechar
+              </button>
+            </div>
+
+            <div className="feedback warning">
+              <strong>A operacao em lote vai criar irregularidades na escala.</strong>
+              <ul>
+                {scaleBatchWarning.messages.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={closeScaleBatchWarning}>
+                Revisar lote
+              </button>
+              <button type="button" className="primary-button" onClick={confirmScaleBatchWarning}>
+                {scaleBatchWarning.confirmLabel}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {scaleWarning && (
         <div className="modal-backdrop" role="presentation" onClick={() => setScaleWarning(null)}>
           <section
@@ -8646,16 +10189,18 @@ function App() {
 
             <form className="form-grid" onSubmit={handleCollaboratorSubmit}>
               <label>
-                CPF
+                CPF <span className="required-marker">*</span>
                 <input
+                  required
                   value={collaboratorForm.cpf}
                   onChange={(event) => changeCollaboratorCpf(event.target.value)}
                   placeholder="000.000.000-00"
                 />
               </label>
               <label>
-                Nome completo
+                Nome completo <span className="required-marker">*</span>
                 <input
+                  required
                   value={collaboratorForm.fullName}
                   onChange={(event) =>
                     setCollaboratorForm({ ...collaboratorForm, fullName: event.target.value })
@@ -8705,7 +10250,7 @@ function App() {
 
               <div className="field-span">
                 <div className="field-heading">
-                  <span className="field-title">Funcao</span>
+                  <span className="field-title">Funcao <span className="required-marker">*</span></span>
                   <span className="field-helper">
                     Selecionadas: {selectedFunctions.length}/{activeFunctionLimit}
                   </span>
@@ -8745,8 +10290,9 @@ function App() {
 
               {selectedFunctions.length > 1 && (
                 <label className="field-span">
-                  Funcao principal nesta empresa
+                  Funcao principal nesta empresa <span className="required-marker">*</span>
                   <select
+                    required
                     value={collaboratorForm.primaryFunction}
                     onChange={(event) =>
                       setCollaboratorForm({
@@ -8771,6 +10317,7 @@ function App() {
                 </button>
               </div>
             </form>
+            <p className="field-helper">Campos marcados com <span className="required-marker">*</span> sao obrigatorios.</p>
           </section>
         </div>
       )}
@@ -8800,15 +10347,17 @@ function App() {
 
             <form className="form-grid" onSubmit={handleFunctionSubmit}>
               <label>
-                Funcao
+                Funcao <span className="required-marker">*</span>
                 <input
+                  required
                   value={functionForm.name}
                   onChange={(event) => setFunctionForm({ ...functionForm, name: event.target.value })}
                 />
               </label>
               <label>
-                Setor
+                Setor <span className="required-marker">*</span>
                 <input
+                  required
                   list="company-sector-options-modal"
                   placeholder="Selecione ou digite um novo setor"
                   value={functionForm.sector}
@@ -8844,8 +10393,9 @@ function App() {
                 />
               </label>
               <label className="field-span">
-                Descritivo
+                Descritivo <span className="required-marker">*</span>
                 <textarea
+                  required
                   rows={5}
                   value={functionForm.description}
                   onChange={(event) =>
@@ -8859,6 +10409,7 @@ function App() {
                 </button>
               </div>
             </form>
+            <p className="field-helper">Campos marcados com <span className="required-marker">*</span> sao obrigatorios.</p>
 
             <datalist id="company-sector-options-modal">
               {availableSectorNames.map((sectorName) => (
