@@ -1,11 +1,16 @@
-import { useMemo } from 'react'
-import type { ReactNode } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import type { DragEvent, ReactNode } from 'react'
 
 type EntityListColumn<Row> = {
   key: string
   label: string
   getValue: (row: Row) => string
   renderCell?: (row: Row) => ReactNode
+}
+
+type SortState = {
+  columnKey: string
+  direction: 'asc' | 'desc'
 }
 
 type EntityListTableProps<Row extends { id: number }> = {
@@ -33,6 +38,34 @@ export function EntityListTable<Row extends { id: number }>({
   exportFileName,
   renderActions,
 }: EntityListTableProps<Row>) {
+  const [openColumnMenu, setOpenColumnMenu] = useState<string | null>(null)
+  const [sortState, setSortState] = useState<SortState | null>(null)
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({})
+  const [visibleColumnKeys, setVisibleColumnKeys] = useState<string[]>(() => columns.map((column) => column.key))
+  const [draggedColumnKey, setDraggedColumnKey] = useState<string | null>(null)
+
+  useEffect(() => {
+    const availableKeys = new Set(columns.map((column) => column.key))
+
+    setVisibleColumnKeys((current) => {
+      const preserved = current.filter((columnKey) => availableKeys.has(columnKey))
+      const missing = columns
+        .map((column) => column.key)
+        .filter((columnKey) => !preserved.includes(columnKey))
+      return [...preserved, ...missing]
+    })
+
+    setColumnFilters((current) =>
+      Object.fromEntries(Object.entries(current).filter(([columnKey]) => availableKeys.has(columnKey))),
+    )
+
+    setSortState((current) =>
+      current && availableKeys.has(current.columnKey) ? current : null,
+    )
+
+    setOpenColumnMenu((current) => (current && availableKeys.has(current) ? current : null))
+  }, [columns])
+
   const orderedColumns = useMemo(() => {
     const fallbackOrder = columns.map((column) => column.key)
     const resolvedOrder = columnOrder.length > 0 ? columnOrder : fallbackOrder
@@ -50,39 +83,177 @@ export function EntityListTable<Row extends { id: number }>({
     return ordered
   }, [columnOrder, columns])
 
+  const visibleColumns = useMemo(
+    () => orderedColumns.filter((column) => visibleColumnKeys.includes(column.key)),
+    [orderedColumns, visibleColumnKeys],
+  )
+
+  const hiddenColumns = useMemo(
+    () => orderedColumns.filter((column) => !visibleColumnKeys.includes(column.key)),
+    [orderedColumns, visibleColumnKeys],
+  )
+
+  const distinctValuesByColumn = useMemo(
+    () =>
+      Object.fromEntries(
+        orderedColumns.map((column) => [
+          column.key,
+          Array.from(
+            new Set(
+              rows
+                .map((row) => column.getValue(row).trim())
+                .filter((value) => value.length > 0),
+            ),
+          ).sort((left, right) => left.localeCompare(right, 'pt-BR', { sensitivity: 'base' })),
+        ]),
+      ) as Record<string, string[]>,
+    [orderedColumns, rows],
+  )
+
   const normalizedSearch = searchTerm.trim().toLowerCase()
 
   const filteredRows = useMemo(() => {
-    if (!normalizedSearch) {
-      return rows
+    const baseRows = rows.filter((row) => {
+      const matchesGlobalSearch =
+        normalizedSearch.length === 0 ||
+        orderedColumns.some((column) => column.getValue(row).toLowerCase().includes(normalizedSearch))
+
+      if (!matchesGlobalSearch) {
+        return false
+      }
+
+      return orderedColumns.every((column) => {
+        const selectedValues = columnFilters[column.key] ?? []
+        if (selectedValues.length === 0) {
+          return true
+        }
+
+        return selectedValues.includes(column.getValue(row).trim())
+      })
+    })
+
+    if (!sortState) {
+      return baseRows
     }
 
-    return rows.filter((row) =>
-      orderedColumns.some((column) =>
-        column.getValue(row).toLowerCase().includes(normalizedSearch),
-      ),
-    )
-  }, [normalizedSearch, orderedColumns, rows])
+    const sortColumn = orderedColumns.find((column) => column.key === sortState.columnKey)
+    if (!sortColumn) {
+      return baseRows
+    }
 
-  function moveColumn(columnKey: string, direction: 'left' | 'right') {
+    return [...baseRows].sort((left, right) => {
+      const leftValue = sortColumn.getValue(left)
+      const rightValue = sortColumn.getValue(right)
+      const comparison = leftValue.localeCompare(rightValue, 'pt-BR', {
+        sensitivity: 'base',
+        numeric: true,
+      })
+
+      if (comparison === 0) {
+        return left.id - right.id
+      }
+
+      return sortState.direction === 'asc' ? comparison : -comparison
+    })
+  }, [columnFilters, normalizedSearch, orderedColumns, rows, sortState])
+
+  function reorderColumns(sourceColumnKey: string, targetColumnKey: string) {
+    if (sourceColumnKey === targetColumnKey) {
+      return
+    }
+
     const currentOrder = orderedColumns.map((column) => column.key)
-    const currentIndex = currentOrder.indexOf(columnKey)
-    const targetIndex = direction === 'left' ? currentIndex - 1 : currentIndex + 1
+    const sourceIndex = currentOrder.indexOf(sourceColumnKey)
+    const targetIndex = currentOrder.indexOf(targetColumnKey)
 
-    if (currentIndex <= 0 || targetIndex <= 0 || targetIndex >= currentOrder.length) {
+    if (sourceIndex < 0 || targetIndex < 0) {
       return
     }
 
     const nextOrder = [...currentOrder]
-    ;[nextOrder[currentIndex], nextOrder[targetIndex]] = [nextOrder[targetIndex], nextOrder[currentIndex]]
+    const [movedColumnKey] = nextOrder.splice(sourceIndex, 1)
+    nextOrder.splice(targetIndex, 0, movedColumnKey)
     onColumnOrderChange(nextOrder)
+  }
+
+  function handleHeaderDragStart(event: DragEvent<HTMLTableCellElement>, columnKey: string) {
+    setDraggedColumnKey(columnKey)
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', columnKey)
+  }
+
+  function handleHeaderDrop(event: DragEvent<HTMLTableCellElement>, targetColumnKey: string) {
+    event.preventDefault()
+    const sourceColumnKey = draggedColumnKey ?? event.dataTransfer.getData('text/plain')
+    setDraggedColumnKey(null)
+
+    if (!sourceColumnKey) {
+      return
+    }
+
+    reorderColumns(sourceColumnKey, targetColumnKey)
+  }
+
+  function toggleColumnValueFilter(columnKey: string, value: string) {
+    setColumnFilters((current) => {
+      const selectedValues = current[columnKey] ?? []
+      const nextValues = selectedValues.includes(value)
+        ? selectedValues.filter((item) => item !== value)
+        : [...selectedValues, value]
+
+      if (nextValues.length === 0) {
+        const { [columnKey]: _removed, ...rest } = current
+        void _removed
+        return rest
+      }
+
+      return {
+        ...current,
+        [columnKey]: nextValues,
+      }
+    })
+  }
+
+  function clearColumnFilter(columnKey: string) {
+    setColumnFilters((current) => {
+      const { [columnKey]: _removed, ...rest } = current
+      void _removed
+      return rest
+    })
+  }
+
+  function hideColumn(columnKey: string) {
+    if (visibleColumnKeys.length <= 1) {
+      return
+    }
+
+    setVisibleColumnKeys((current) => current.filter((item) => item !== columnKey))
+    setOpenColumnMenu((current) => (current === columnKey ? null : current))
+  }
+
+  function showColumn(columnKey: string) {
+    setVisibleColumnKeys((current) => {
+      if (current.includes(columnKey)) {
+        return current
+      }
+
+      const nextVisible = orderedColumns
+        .map((column) => column.key)
+        .filter((key) => key === columnKey || current.includes(key))
+
+      return nextVisible
+    })
+  }
+
+  function setSort(columnKey: string, direction: 'asc' | 'desc') {
+    setSortState({ columnKey, direction })
   }
 
   async function exportRows() {
     const XLSX = await import('xlsx')
     const aoa = [
-      orderedColumns.map((column) => column.label),
-      ...filteredRows.map((row) => orderedColumns.map((column) => column.getValue(row))),
+      visibleColumns.map((column) => column.label),
+      ...filteredRows.map((row) => visibleColumns.map((column) => column.getValue(row))),
     ]
     const workbook = XLSX.utils.book_new()
     const worksheet = XLSX.utils.aoa_to_sheet(aoa)
@@ -110,6 +281,24 @@ export function EntityListTable<Row extends { id: number }>({
         </div>
       </div>
 
+      {hiddenColumns.length > 0 ? (
+        <div className="entity-hidden-columns">
+          <strong>Colunas ocultas</strong>
+          <div className="entity-hidden-column-list">
+            {hiddenColumns.map((column) => (
+              <button
+                key={column.key}
+                type="button"
+                className="ghost-button entity-hidden-column-chip"
+                onClick={() => showColumn(column.key)}
+              >
+                Exibir {column.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       {filteredRows.length === 0 ? (
         <div className="empty-state">{emptyMessage}</div>
       ) : (
@@ -117,43 +306,98 @@ export function EntityListTable<Row extends { id: number }>({
           <table className="entity-table">
             <thead>
               <tr>
-                {orderedColumns.map((column, index) => (
-                  <th
-                    key={column.key}
-                    className={index === 0 ? 'entity-primary-cell entity-header-cell' : 'entity-header-cell'}
-                  >
-                    <div className="entity-column-header">
-                      <strong>{column.label}</strong>
-                      <div className="entity-column-actions">
+                {visibleColumns.map((column, index) => {
+                  const selectedValues = columnFilters[column.key] ?? []
+                  const columnSortState =
+                    sortState?.columnKey === column.key ? sortState.direction : null
+
+                  return (
+                    <th
+                      key={column.key}
+                      draggable
+                      onDragStart={(event) => handleHeaderDragStart(event, column.key)}
+                      onDragOver={(event) => event.preventDefault()}
+                      onDrop={(event) => handleHeaderDrop(event, column.key)}
+                      onDragEnd={() => setDraggedColumnKey(null)}
+                      className={index === 0 ? 'entity-primary-cell entity-header-cell' : 'entity-header-cell'}
+                    >
+                      <div className="entity-column-header">
+                        <div className="entity-column-header-copy">
+                          <strong>{column.label}</strong>
+                          <span className="entity-column-meta">
+                            Arraste para reordenar
+                            {columnSortState ? ` • ${columnSortState === 'asc' ? 'A-Z' : 'Z-A'}` : ''}
+                            {selectedValues.length > 0 ? ` • ${selectedValues.length} filtro(s)` : ''}
+                          </span>
+                        </div>
                         <button
                           type="button"
-                          className="ghost-button"
-                          onClick={() => moveColumn(column.key, 'left')}
-                          disabled={index <= 1}
-                          aria-label={`Mover coluna ${column.label} para a esquerda`}
+                          className="ghost-button entity-column-menu-trigger"
+                          onClick={() =>
+                            setOpenColumnMenu((current) => (current === column.key ? null : column.key))
+                          }
+                          aria-label={`Abrir opcoes da coluna ${column.label}`}
                         >
-                          ←
+                          ⋮
                         </button>
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          onClick={() => moveColumn(column.key, 'right')}
-                          disabled={index === 0 || index === orderedColumns.length - 1}
-                          aria-label={`Mover coluna ${column.label} para a direita`}
-                        >
-                          →
-                        </button>
+                        {openColumnMenu === column.key ? (
+                          <div className="entity-column-menu" onClick={(event) => event.stopPropagation()}>
+                            <div className="entity-column-menu-actions">
+                              <button type="button" className="ghost-button" onClick={() => setSort(column.key, 'asc')}>
+                                Ordenar A-Z
+                              </button>
+                              <button type="button" className="ghost-button" onClick={() => setSort(column.key, 'desc')}>
+                                Ordenar Z-A
+                              </button>
+                              <button type="button" className="ghost-button" onClick={() => clearColumnFilter(column.key)}>
+                                Limpar filtro
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => setSortState((current) => (current?.columnKey === column.key ? null : current))}
+                              >
+                                Remover ordenacao
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={() => hideColumn(column.key)}
+                                disabled={visibleColumnKeys.length <= 1}
+                              >
+                                Ocultar coluna
+                              </button>
+                            </div>
+                            <div className="entity-column-menu-values">
+                              <strong>Filtrar valores</strong>
+                              {distinctValuesByColumn[column.key]?.length ? (
+                                distinctValuesByColumn[column.key].map((value) => (
+                                  <label key={value} className="entity-column-filter-option">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedValues.includes(value)}
+                                      onChange={() => toggleColumnValueFilter(column.key, value)}
+                                    />
+                                    <span>{value}</span>
+                                  </label>
+                                ))
+                              ) : (
+                                <span className="field-helper">Sem valores distintos disponiveis.</span>
+                              )}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
-                    </div>
-                  </th>
-                ))}
-                {renderActions ? <th className="entity-actions-cell">Acoes</th> : null}
+                    </th>
+                  )
+                })}
+                {renderActions ? <th className="entity-actions-cell entity-header-cell">Acoes</th> : null}
               </tr>
             </thead>
             <tbody>
               {filteredRows.map((row) => (
                 <tr key={row.id}>
-                  {orderedColumns.map((column, index) => (
+                  {visibleColumns.map((column, index) => (
                     <td key={`${row.id}-${column.key}`} className={index === 0 ? 'entity-primary-cell' : undefined}>
                       {column.renderCell ? column.renderCell(row) : column.getValue(row)}
                     </td>

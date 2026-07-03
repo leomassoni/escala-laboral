@@ -188,7 +188,10 @@ Este documento traduz, para o `escala-laboral`, os pontos do `gestor-estoque` qu
   - [x] aplicar horario ou folga na semana visivel por escopo e dias selecionados
   - [ ] aplicar lote por setor/funcao fora da semana corrente
   - [ ] aplicar lote multicolaborador a partir de filtros salvos
-- [ ] relatorio operacional da escala com cobertura, extras previstos e lacunas
+- [~] relatorio operacional da escala com cobertura, extras previstos e lacunas
+  - [x] adicionar leitura diaria de cobertura, lacunas e custo de extras por setor/funcao
+  - [ ] incluir comparativo entre demanda planejada e escala realizada
+  - [ ] destacar dias/linhas criticas direto no painel de relatorios
 - [ ] historico/versionamento da escala com diff e restauracao
 
 ### Sprint 1

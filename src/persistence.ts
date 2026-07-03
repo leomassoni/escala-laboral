@@ -11,6 +11,8 @@ export const storageKeys = {
   scaleExtraRoster: 'escala-laboral:scale-extra-roster',
   users: 'escala-laboral:users',
   auditLogs: 'escala-laboral:audit-logs',
+  session: 'escala-laboral:session',
+  currentCompanyId: 'escala-laboral:current-company-id',
 } as const
 
 export const appStateVersion = 1

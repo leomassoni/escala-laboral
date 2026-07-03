@@ -1,5 +1,6 @@
 export type ReportId =
   | 'scale-consolidated'
+  | 'scale-operations'
   | 'workload-by-collaborator'
   | 'scale-irregularities'
   | 'extras'
@@ -13,6 +14,7 @@ export type ReportId =
 
 export const reportOptions: Array<{ id: ReportId; label: string }> = [
   { id: 'scale-consolidated', label: 'Escala consolidada' },
+  { id: 'scale-operations', label: 'Operacao da escala' },
   { id: 'workload-by-collaborator', label: 'Carga horaria por colaborador' },
   { id: 'scale-irregularities', label: 'Irregularidades da escala' },
   { id: 'extras', label: 'Relatorio de extras' },

@@ -307,6 +307,19 @@ const scheduleListDefaultColumnOrder = [
   'validacao',
 ]
 
+function isValidIsoDateValue(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(new Date(`${value}T12:00:00`).getTime())
+}
+
+function getSafeWeekDates(dateValue: string | null | undefined) {
+  if (!dateValue || !isValidIsoDateValue(dateValue)) {
+    return []
+  }
+
+  const weekDates = getWeekDates(dateValue).filter((date) => !Number.isNaN(date.getTime()))
+  return weekDates.length === 7 ? weekDates : []
+}
+
 type ScaleAssignmentRecord = {
   id: number
   companyId: number
@@ -1184,8 +1197,12 @@ function App() {
   const pendingDiscardActionRef = useRef<(() => void) | null>(null)
   const pendingScaleReplicationRef = useRef<(() => void) | null>(null)
   const pendingScaleBatchRef = useRef<(() => void) | null>(null)
-  const [session, setSession] = useState<Session | null>(null)
-  const [currentCompanyId, setCurrentCompanyId] = useState<number | null>(null)
+  const [session, setSession] = useState<Session | null>(() =>
+    readStoredValue<Session | null>(storageKeys.session, null),
+  )
+  const [currentCompanyId, setCurrentCompanyId] = useState<number | null>(() =>
+    readStoredValue<number | null>(storageKeys.currentCompanyId, null),
+  )
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
   const [loginError, setLoginError] = useState('')
   const [companyForm, setCompanyForm] = useState(emptyCompanyForm)
@@ -1754,7 +1771,7 @@ function App() {
     .map(([, value]) => value)
     .sort((left, right) => left.weekStart.localeCompare(right.weekStart))
   const activeScaleBatchWeekDates =
-    scaleBatchModal === null ? [] : getWeekDates(scaleBatchModal.weekStart)
+    scaleBatchModal === null ? [] : getSafeWeekDates(scaleBatchModal.weekStart)
   const activeScaleBatchRows =
     scaleBatchModal === null
       ? []
@@ -2745,6 +2762,19 @@ function App() {
     return weeks
   }
 
+  function getReportRangeDates() {
+    const dates: string[] = []
+    const cursor = new Date(`${reportStartDate}T12:00:00`)
+    const rangeEnd = new Date(`${reportEndDate}T12:00:00`)
+
+    while (cursor <= rangeEnd) {
+      dates.push(toIsoDate(cursor))
+      cursor.setDate(cursor.getDate() + 1)
+    }
+
+    return dates
+  }
+
   function buildScaleConsolidatedReport(): ReportDataset {
     const rows: Array<Record<string, ReportRowValue>> = []
 
@@ -2812,6 +2842,110 @@ function App() {
         { key: 'saida', label: 'Saida' },
         { key: 'horas', label: 'Horas', align: 'right' },
         { key: 'ativoNoDia', label: 'Ativo no dia', align: 'center' },
+      ],
+      rows,
+    }
+  }
+
+  function buildScaleOperationsReport(): ReportDataset {
+    const grouped = new Map<
+      string,
+      {
+        data: string
+        setor: string
+        funcao: string
+        ativos: number
+        escalados: number
+        lacunas: number
+        extras: number
+        custoExtras: number
+      }
+    >()
+
+    getReportRangeDates().forEach((date) => {
+      const activeCollaboratorsForDate = getReportCollaborators().filter((collaborator) =>
+        isCollaboratorActiveOnDate(collaborator, date),
+      )
+
+      activeCollaboratorsForDate.forEach((collaborator) => {
+        const sectorName = getReportSectorName(collaborator)
+        const functionName = getReportFunctionName(collaborator)
+        const key = [date, sectorName, functionName].join('|')
+        const current = grouped.get(key) ?? {
+          data: formatMonthDateLabel(date),
+          setor: sectorName,
+          funcao: functionName,
+          ativos: 0,
+          escalados: 0,
+          lacunas: 0,
+          extras: 0,
+          custoExtras: 0,
+        }
+        const assignment = getAssignmentForDay(collaborator.id, date)
+        const extraCost = parseCurrencyValue(getFunctionByName(collaborator.primaryFunction)?.extraPayValue ?? '')
+
+        current.ativos += 1
+        if (assignment) {
+          current.escalados += 1
+          if (collaborator.employmentType === 'EXTRA') {
+            current.extras += 1
+            current.custoExtras += extraCost
+          }
+        } else if (collaborator.employmentType !== 'EXTRA') {
+          current.lacunas += 1
+        }
+
+        grouped.set(key, current)
+      })
+    })
+
+    const rows: Array<Record<string, ReportRowValue>> = Array.from(grouped.values())
+      .map((item) => ({
+        ...item,
+        custoExtrasRaw: item.custoExtras,
+        coberturaPercentual:
+          item.ativos > 0 ? `${Math.round((item.escalados / item.ativos) * 100)}%` : '0%',
+        custoExtras: formatCurrency(item.custoExtras),
+      }))
+      .sort((left, right) =>
+        Number(right.lacunas) - Number(left.lacunas) ||
+        Number(right.custoExtrasRaw) - Number(left.custoExtrasRaw) ||
+        `${left.data}-${left.setor}-${left.funcao}`.localeCompare(`${right.data}-${right.setor}-${right.funcao}`),
+      )
+      .map((row) => {
+        const { custoExtrasRaw, ...reportRow } = row
+        void custoExtrasRaw
+        return reportRow
+      })
+
+    const totalLacunas = rows.reduce((sum, item) => sum + Number(item.lacunas), 0)
+    const totalExtras = rows.reduce((sum, item) => sum + Number(item.extras), 0)
+    const totalCustoExtras = rows.reduce(
+      (sum, item) => sum + parseCurrencyValue(String(item.custoExtras)),
+      0,
+    )
+
+    return {
+      id: 'scale-operations',
+      title: 'Operacao da escala',
+      description: 'Leitura diaria de cobertura, lacunas e extras por setor e funcao.',
+      filenameSuffix: 'operacao-escala',
+      summary: [
+        { label: 'Linhas operacionais', value: String(rows.length) },
+        { label: 'Lacunas abertas', value: String(totalLacunas) },
+        { label: 'Extras previstos', value: String(totalExtras) },
+        { label: 'Custo extras', value: formatCurrency(totalCustoExtras) },
+      ],
+      columns: [
+        { key: 'data', label: 'Data' },
+        { key: 'setor', label: 'Setor' },
+        { key: 'funcao', label: 'Funcao' },
+        { key: 'ativos', label: 'Ativos na base', align: 'right' },
+        { key: 'escalados', label: 'Escalados', align: 'right' },
+        { key: 'lacunas', label: 'Sem escala', align: 'right' },
+        { key: 'coberturaPercentual', label: 'Cobertura', align: 'right' },
+        { key: 'extras', label: 'Extras', align: 'right' },
+        { key: 'custoExtras', label: 'Custo extras', align: 'right' },
       ],
       rows,
     }
@@ -3343,6 +3477,8 @@ function App() {
 
   function getActiveReportDataset(): ReportDataset {
     switch (selectedReportId) {
+      case 'scale-operations':
+        return buildScaleOperationsReport()
       case 'workload-by-collaborator':
         return buildWorkloadByCollaboratorReport()
       case 'scale-irregularities':
@@ -3592,6 +3728,14 @@ function App() {
   }
 
   function openScaleBatchModal(weekDates: Date[]) {
+    if (weekDates.length !== 7 || weekDates.some((date) => Number.isNaN(date.getTime()))) {
+      setScaleWarning({
+        title: 'Semana indisponivel',
+        messages: ['Nao foi possivel abrir a operacao em lote para esta semana. Recarregue a pagina e tente novamente.'],
+      })
+      return
+    }
+
     setScaleBatchModal({
       weekStart: toIsoDate(weekDates[0]),
       employmentScope: 'TODOS',
@@ -3969,7 +4113,16 @@ function App() {
       return
     }
 
-    const weekDates = getWeekDates(scaleBatchModal.weekStart)
+    const weekDates = getSafeWeekDates(scaleBatchModal.weekStart)
+    if (weekDates.length !== 7) {
+      closeScaleBatchModal()
+      setScaleWarning({
+        title: 'Semana invalida',
+        messages: ['A operacao em lote foi interrompida porque a semana selecionada ficou invalida. Abra novamente e tente de novo.'],
+      })
+      return
+    }
+
     const targetRows = getVisibleWeekRows(weekDates).filter((item) =>
       scaleBatchModal.employmentScope === 'TODOS'
         ? true
@@ -5984,6 +6137,28 @@ function App() {
   }, [companies, currentCompanyId, session, users])
 
   useEffect(() => {
+    if (session === null) {
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(storageKeys.session)
+      }
+      return
+    }
+
+    writeStoredValue(storageKeys.session, session)
+  }, [session])
+
+  useEffect(() => {
+    if (currentCompanyId === null) {
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(storageKeys.currentCompanyId)
+      }
+      return
+    }
+
+    writeStoredValue(storageKeys.currentCompanyId, currentCompanyId)
+  }, [currentCompanyId])
+
+  useEffect(() => {
     if (companyAgreementSuggestion && !companyForm.collectiveAgreementId) {
       startTransition(() => {
         setCompanyForm((current) => ({
@@ -6476,9 +6651,6 @@ function App() {
             <div className="hero-details">
               <span>{session.user.fullName}</span>
               <span>{currentCompany ? currentCompany.status : 'Sem empresa ativa'}</span>
-              {!isViewer ? (
-                <span>{currentCompany ? currentCompany.cnpj || 'CNPJ pendente' : 'Sem empresa ativa'}</span>
-              ) : null}
             </div>
           </div>
           <div className="hero-meta">
@@ -7612,27 +7784,37 @@ function App() {
                 <div className="table-actions">
                   <button
                     type="button"
-                    className="secondary-button"
+                    className="icon-button icon-edit"
                     onClick={() => editCollaborator(item.id)}
+                    aria-label={`Editar colaborador ${getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf}`}
+                    title="Editar"
                   >
-                    Editar
+                    ✎
                   </button>
                   {canManageCollaboratorActivation ? (
                     <button
                       type="button"
-                      className={item.isActive ? 'warning-button' : 'secondary-button'}
+                      className="icon-button icon-disable"
                       onClick={() => toggleCollaboratorActivation(item.id)}
+                      aria-label={
+                        item.isActive
+                          ? `Inativar colaborador ${getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf}`
+                          : `Ativar colaborador ${getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf}`
+                      }
+                      title={item.isActive ? 'Inativar' : 'Ativar'}
                     >
-                      {item.isActive ? 'Inativar' : 'Ativar'}
+                      {item.isActive ? '◐' : '◑'}
                     </button>
                   ) : null}
                   {isSystemAdmin ? (
                     <button
                       type="button"
-                      className="danger-button"
+                      className="icon-button icon-delete"
                       onClick={() => deleteCollaborator(item.id)}
+                      aria-label={`Excluir colaborador ${getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf}`}
+                      title="Excluir"
                     >
-                      Excluir
+                      🗑
                     </button>
                   ) : null}
                 </div>
@@ -7739,25 +7921,31 @@ function App() {
                 <div className="table-actions">
                   <button
                     type="button"
-                    className="secondary-button"
+                    className="icon-button icon-edit"
                     onClick={() => editFunction(item.id)}
+                    aria-label={`Editar funcao ${item.name}`}
+                    title="Editar"
                   >
-                    Editar
+                    ✎
                   </button>
                   <button
                     type="button"
-                    className={item.isActive ? 'warning-button' : 'secondary-button'}
+                    className="icon-button icon-disable"
                     onClick={() => toggleFunctionActivation(item.id)}
+                    aria-label={item.isActive ? `Inativar funcao ${item.name}` : `Ativar funcao ${item.name}`}
+                    title={item.isActive ? 'Inativar' : 'Ativar'}
                   >
-                    {item.isActive ? 'Inativar' : 'Ativar'}
+                    {item.isActive ? '◐' : '◑'}
                   </button>
                   {(isSystemAdmin || session?.user.role === 'Gestor') ? (
                     <button
                       type="button"
-                      className="danger-button"
+                      className="icon-button icon-delete"
                       onClick={() => deleteFunction(item.id)}
+                      aria-label={`Excluir funcao ${item.name}`}
+                      title="Excluir"
                     >
-                      Excluir
+                      🗑
                     </button>
                   ) : null}
                 </div>
@@ -8052,24 +8240,30 @@ function App() {
                 <div className="table-actions">
                   <button
                     type="button"
-                    className="secondary-button"
+                    className="icon-button icon-edit"
                     onClick={() => editSchedule(item.id)}
+                    aria-label={`Editar horario ${item.shiftName}`}
+                    title="Editar"
                   >
-                    Editar
+                    ✎
                   </button>
                   <button
                     type="button"
-                    className={item.isActive ? 'warning-button' : 'secondary-button'}
+                    className="icon-button icon-disable"
                     onClick={() => toggleScheduleActivation(item.id)}
+                    aria-label={item.isActive ? `Inativar horario ${item.shiftName}` : `Ativar horario ${item.shiftName}`}
+                    title={item.isActive ? 'Inativar' : 'Ativar'}
                   >
-                    {item.isActive ? 'Inativar' : 'Ativar'}
+                    {item.isActive ? '◐' : '◑'}
                   </button>
                   <button
                     type="button"
-                    className="danger-button"
+                    className="icon-button icon-delete"
                     onClick={() => deleteSchedule(item.id)}
+                    aria-label={`Excluir horario ${item.shiftName}`}
+                    title="Excluir"
                   >
-                    Excluir
+                    🗑
                   </button>
                 </div>
               )}
@@ -9857,7 +10051,9 @@ function App() {
             </div>
 
             <p className="section-note">
-              {formatWeekLabel(activeScaleBatchWeekDates.length > 0 ? activeScaleBatchWeekDates : getWeekDates(scaleBatchModal.weekStart))}
+              {activeScaleBatchWeekDates.length === 7
+                ? formatWeekLabel(activeScaleBatchWeekDates)
+                : 'Semana visivel indisponivel. Feche o modal e abra novamente.'}
             </p>
 
             <form className="form-grid" onSubmit={submitScaleBatch}>
