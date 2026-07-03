@@ -18,6 +18,7 @@ export const storageKeys = {
 export const appStateVersion = 1
 export const apiBaseUrl = (import.meta.env.VITE_API_URL ?? '/api').replace(/\/$/, '')
 export const modularStateKeys = [
+  'companies',
   'agreements',
   'sectors',
   'functions',

@@ -1,4 +1,4 @@
-import { Fragment, startTransition, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
 import {
@@ -195,6 +195,7 @@ type CompanyRecord = {
   defaultReportId?: ReportId
   defaultPrintIncludeExtras?: boolean
   allowPastScaleEdits?: boolean
+  linkedCompanyIds: number[]
 }
 
 type FunctionRecord = {
@@ -290,6 +291,29 @@ type ImpactWarningState = {
   replacementOptions: Array<{ value: string; label: string }>
 }
 
+type FunctionCloneModalState = {
+  sourceFunctionId: number
+  name: string
+  sector: string
+  description: string
+  baseSalary: string
+  serviceQuota: string
+  extraPayValue: string
+}
+
+type ScheduleCloneModalState = {
+  sourceScheduleId: number
+  shiftName: string
+  startTime: string
+  startPeriod: 'AM' | 'PM'
+  breakStart: string
+  breakStartPeriod: 'AM' | 'PM'
+  breakEnd: string
+  breakEndPeriod: 'AM' | 'PM'
+  endTime: string
+  endPeriod: 'AM' | 'PM'
+}
+
 const collaboratorListDefaultColumnOrder = [
   'nome',
   'cpf',
@@ -303,6 +327,7 @@ const collaboratorListDefaultColumnOrder = [
 
 const functionListDefaultColumnOrder = [
   'funcao',
+  'origem',
   'setor',
   'salario',
   'cota',
@@ -313,6 +338,7 @@ const functionListDefaultColumnOrder = [
 
 const scheduleListDefaultColumnOrder = [
   'turno',
+  'origem',
   'sigla',
   'entrada',
   'pausa',
@@ -909,6 +935,42 @@ function getNextNumericId<T extends { id: number }>(items: T[]) {
   return items.reduce((max, item) => Math.max(max, item.id), 0) + 1
 }
 
+function normalizeLinkedCompanyIdsInCollection(
+  companies: Array<CompanyRecord & { linkedCompanyIds?: number[] }>,
+) {
+  const companyIds = new Set(companies.map((item) => item.id))
+
+  return companies.map((item) => ({
+    ...item,
+    linkedCompanyIds: Array.from(
+      new Set(
+        (Array.isArray(item.linkedCompanyIds) ? item.linkedCompanyIds : []).filter(
+          (linkedCompanyId) => linkedCompanyId !== item.id && companyIds.has(linkedCompanyId),
+        ),
+      ),
+    ).sort((left, right) => left - right),
+  }))
+}
+
+function buildUniqueLocalCloneName(baseValue: string, existingValues: string[]) {
+  const trimmedBaseValue = baseValue.trim() || 'Copia local'
+  const blockedValues = new Set(existingValues.map((item) => item.trim().toLowerCase()))
+
+  const firstCandidate = `${trimmedBaseValue} (Local)`
+  if (!blockedValues.has(firstCandidate.toLowerCase())) {
+    return firstCandidate
+  }
+
+  for (let index = 2; index <= 99; index += 1) {
+    const candidate = `${trimmedBaseValue} (Local ${index})`
+    if (!blockedValues.has(candidate.toLowerCase())) {
+      return candidate
+    }
+  }
+
+  return `${trimmedBaseValue} (${Date.now()})`
+}
+
 function mergeSeedAgreements(storedAgreements: Array<CollectiveAgreementRecord & { isActive?: boolean }>) {
   if (storedAgreements.length === 0) {
     return initialCollectiveAgreements.map((item) => ({ ...item, isActive: item.isActive ?? true }))
@@ -930,7 +992,7 @@ function mergeSeedAgreements(storedAgreements: Array<CollectiveAgreementRecord &
 
 function normalizePersistedState(state: AppStateSnapshot) {
   return {
-    companies: state.companies.map((item) => ({
+    companies: normalizeLinkedCompanyIdsInCollection(state.companies).map((item) => ({
       ...item,
       suggestedCollectiveAgreementId: item.suggestedCollectiveAgreementId ?? null,
       defaultScaleViewMode: item.defaultScaleViewMode ?? 'week',
@@ -1079,7 +1141,9 @@ function validateSchedule(
 function App() {
   const [activeSection, setActiveSection] = useState<ActiveSection>('Painel')
   const [companies, setCompanies] = useState<CompanyRecord[]>(() =>
-    readStoredValue<Array<CompanyRecord & { suggestedCollectiveAgreementId?: number | null }>>(storageKeys.companies, []).map((item) => ({
+    normalizeLinkedCompanyIdsInCollection(
+      readStoredValue<Array<CompanyRecord & { suggestedCollectiveAgreementId?: number | null; linkedCompanyIds?: number[] }>>(storageKeys.companies, []),
+    ).map((item) => ({
       ...item,
       suggestedCollectiveAgreementId: item.suggestedCollectiveAgreementId ?? null,
     })),
@@ -1197,6 +1261,7 @@ function App() {
   const [isPersistenceReady, setIsPersistenceReady] = useState(false)
   const skipNextRemoteSyncRef = useRef(false)
   const skipNextModuleSyncRef = useRef<Record<ModularStateKey, boolean>>({
+    companies: false,
     agreements: false,
     sectors: false,
     functions: false,
@@ -1223,6 +1288,7 @@ function App() {
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
   const [loginError, setLoginError] = useState('')
   const [companyForm, setCompanyForm] = useState(emptyCompanyForm)
+  const [companyLinkedCompanyIds, setCompanyLinkedCompanyIds] = useState<number[]>([])
   const [functionForm, setFunctionForm] = useState(emptyFunctionForm)
   const [collaboratorForm, setCollaboratorForm] = useState(emptyCollaboratorForm)
   const [scheduleForm, setScheduleForm] = useState(emptyScheduleForm)
@@ -1238,6 +1304,8 @@ function App() {
   } | null>(null)
   const [collaboratorWarning, setCollaboratorWarning] = useState<{ title: string; messages: string[] } | null>(null)
   const [functionWarning, setFunctionWarning] = useState<{ title: string; messages: string[] } | null>(null)
+  const [functionCloneModal, setFunctionCloneModal] = useState<FunctionCloneModalState | null>(null)
+  const [scheduleCloneModal, setScheduleCloneModal] = useState<ScheduleCloneModalState | null>(null)
   const [userWarning, setUserWarning] = useState<{ title: string; messages: string[] } | null>(null)
   const [impactWarning, setImpactWarning] = useState<ImpactWarningState | null>(null)
   const [discardWarning, setDiscardWarning] = useState<{ title: string; message: string } | null>(null)
@@ -1339,11 +1407,32 @@ function App() {
   const compatibleAgreementIds = new Set(companyAgreementMatches.map((item) => item.id))
   const compatibleAgreementOptions = sortedAgreementOptions.filter((item) => compatibleAgreementIds.has(item.id))
   const otherAgreementOptions = sortedAgreementOptions.filter((item) => !compatibleAgreementIds.has(item.id))
+  function getCompanyLinkScopeIds(companyId: number | null) {
+    if (companyId === null) {
+      return [] as number[]
+    }
+
+    const directLinkedCompanyIds =
+      companies.find((item) => item.id === companyId)?.linkedCompanyIds.filter((linkedCompanyId) => linkedCompanyId !== companyId) ?? []
+    const reverseLinkedCompanyIds = companies
+      .filter((item) => item.id !== companyId && item.linkedCompanyIds.includes(companyId))
+      .map((item) => item.id)
+
+    return Array.from(new Set([companyId, ...directLinkedCompanyIds, ...reverseLinkedCompanyIds])).sort(
+      (left, right) => left - right,
+    )
+  }
+
+  const currentCompanyLinkScopeIds = getCompanyLinkScopeIds(currentCompanyId)
   const companySectors = currentCompanyId === null ? [] : sectors.filter((item) => item.companyId === currentCompanyId)
-  const companyFunctions = currentCompanyId === null ? [] : functions.filter((item) => item.companyId === currentCompanyId)
+  const companyFunctions =
+    currentCompanyId === null ? [] : functions.filter((item) => currentCompanyLinkScopeIds.includes(item.companyId))
+  const localCompanyFunctions = currentCompanyId === null ? [] : functions.filter((item) => item.companyId === currentCompanyId)
   const companyCollaborators =
     currentCompanyId === null ? [] : collaborators.filter((item) => item.companyId === currentCompanyId)
-  const companySchedules = currentCompanyId === null ? [] : schedules.filter((item) => item.companyId === currentCompanyId)
+  const companySchedules =
+    currentCompanyId === null ? [] : schedules.filter((item) => currentCompanyLinkScopeIds.includes(item.companyId))
+  const localCompanySchedules = currentCompanyId === null ? [] : schedules.filter((item) => item.companyId === currentCompanyId)
   const companyScaleAssignments =
     currentCompanyId === null ? [] : scaleAssignments.filter((item) => item.companyId === currentCompanyId)
   const companyScaleComments =
@@ -1351,6 +1440,10 @@ function App() {
   const companyScaleExtraRoster =
     currentCompanyId === null ? [] : scaleExtraRoster.filter((item) => item.companyId === currentCompanyId)
   const companyUsers = currentCompanyId === null ? [] : users.filter((item) => item.companyId === currentCompanyId)
+  const companyLinkableOptions =
+    currentCompanyId === null
+      ? companies.filter((item) => item.status === 'ATIVA')
+      : companies.filter((item) => item.id !== currentCompanyId && item.status === 'ATIVA')
   const currentCollaboratorProfile =
     collaboratorProfiles.find(
       (item) => item.cpf.replace(/\D/g, '') === collaboratorForm.cpf.replace(/\D/g, ''),
@@ -1364,6 +1457,10 @@ function App() {
   )
   const availableSectorNames = Array.from(new Set(companySectors.map((item) => item.name))).sort((left, right) =>
     left.localeCompare(right),
+  )
+  const getCompanyTradeNameById = useCallback(
+    (companyId: number) => companies.find((item) => item.id === companyId)?.tradeName ?? String(companyId),
+    [companies],
   )
   const collaboratorProfileByCpf = useMemo(
     () =>
@@ -1416,6 +1513,12 @@ function App() {
         getValue: (item: FunctionRecord) => item.name,
         renderCell: (item: FunctionRecord) => <strong>{item.name}</strong>,
       },
+      {
+        key: 'origem',
+        label: 'Origem',
+        getValue: (item: FunctionRecord) =>
+          item.companyId === currentCompanyId ? 'Empresa atual' : getCompanyTradeNameById(item.companyId),
+      },
       { key: 'setor', label: 'Setor', getValue: (item: FunctionRecord) => item.sector },
       {
         key: 'salario',
@@ -1436,7 +1539,7 @@ function App() {
         getValue: (item: FunctionRecord) => (item.isActive ? 'Ativa' : 'Inativa'),
       },
     ],
-    [],
+    [currentCompanyId, getCompanyTradeNameById],
   )
   const scheduleListColumns = useMemo(
     () => [
@@ -1446,21 +1549,27 @@ function App() {
         getValue: (item: ScheduleRecord) => item.shiftName,
         renderCell: (item: ScheduleRecord) => <strong>{item.shiftName}</strong>,
       },
+      {
+        key: 'origem',
+        label: 'Origem',
+        getValue: (item: ScheduleRecord) =>
+          item.companyId === currentCompanyId ? 'Empresa atual' : getCompanyTradeNameById(item.companyId),
+      },
       { key: 'sigla', label: 'Sigla', getValue: (item: ScheduleRecord) => item.abbreviation },
-      { key: 'entrada', label: 'Entrada', getValue: (item: ScheduleRecord) => `${item.startTime} ${item.startPeriod}` },
+      { key: 'entrada', label: 'Entrada', getValue: (item: ScheduleRecord) => item.startTime + ' ' + item.startPeriod },
       {
         key: 'pausa',
         label: 'Inicio pausa',
         getValue: (item: ScheduleRecord) =>
-          item.breakStart && item.breakEnd ? `${item.breakStart} ${item.breakStartPeriod}` : 'Sem pausa',
+          item.breakStart && item.breakEnd ? item.breakStart + ' ' + item.breakStartPeriod : 'Sem pausa',
       },
       {
         key: 'retorno',
         label: 'Fim pausa',
         getValue: (item: ScheduleRecord) =>
-          item.breakStart && item.breakEnd ? `${item.breakEnd} ${item.breakEndPeriod}` : 'Nao se aplica',
+          item.breakStart && item.breakEnd ? item.breakEnd + ' ' + item.breakEndPeriod : 'Nao se aplica',
       },
-      { key: 'saida', label: 'Saida', getValue: (item: ScheduleRecord) => `${item.endTime} ${item.endPeriod}` },
+      { key: 'saida', label: 'Saida', getValue: (item: ScheduleRecord) => item.endTime + ' ' + item.endPeriod },
       { key: 'jornada', label: 'Horas', getValue: (item: ScheduleRecord) => formatWorkedHours(item.netMinutes) },
       {
         key: 'status',
@@ -1469,13 +1578,15 @@ function App() {
       },
       { key: 'validacao', label: 'Validacao', getValue: (item: ScheduleRecord) => item.validationMessage },
     ],
-    [],
+    [currentCompanyId, getCompanyTradeNameById],
   )
   const additionalUserCompanyOptions =
     currentCompanyId === null
       ? []
       : companies
-          .filter((item) => item.id !== currentCompanyId && item.status === 'ATIVA')
+          .filter(
+            (item) => item.id !== currentCompanyId && item.status === 'ATIVA' && currentCompanyLinkScopeIds.includes(item.id),
+          )
           .sort((left, right) => left.tradeName.localeCompare(right.tradeName))
   const activeFunctionLimit = collaboratorForm.employmentType === 'EXTRA' ? 6 : 1
   const selectedFunctions = collaboratorForm.functions
@@ -1869,6 +1980,35 @@ function App() {
       </label>
     </>
   )
+  const companyLinksField = session?.kind === 'systemAdmin' ? (
+    <div className="field-span">
+      <span className="field-title">Empresas vinculadas</span>
+      {companyLinkableOptions.length === 0 ? (
+        <small>Nenhuma outra empresa ativa disponivel para vinculo.</small>
+      ) : (
+        <div className="selector-grid">
+          {companyLinkableOptions.map((company) => {
+            const checked = companyLinkedCompanyIds.includes(company.id)
+            return (
+              <label key={company.id} className="checkbox-card">
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() =>
+                    setCompanyLinkedCompanyIds((current) =>
+                      checked ? current.filter((item) => item !== company.id) : [...current, company.id].sort((left, right) => left - right),
+                    )
+                  }
+                />
+                <span>{company.tradeName} • {company.city}/{company.state}</span>
+              </label>
+            )
+          })}
+        </div>
+      )}
+      <small>O vinculo autoriza compartilhamento de funcoes e horarios, mas nao mistura colaboradores nem escala.</small>
+    </div>
+  ) : null
   const scaleWeeks = buildScaleWeeks()
   const scaleSectorOptions = ['Todos', ...visibleScaleSectorOptions]
   const scaleFunctionOptions = ['Todos', ...visibleScaleFunctionOptions]
@@ -1933,6 +2073,14 @@ function App() {
       ]
   const liveSchedulePreview = buildSchedulePreview(scheduleForm)
   const liveWorkedMinutes = computeScheduleNetMinutes(scheduleForm)
+  const scheduleClonePreview = scheduleCloneModal ? buildSchedulePreview(scheduleCloneModal) : null
+  const scheduleCloneWorkedMinutes = scheduleCloneModal ? computeScheduleNetMinutes(scheduleCloneModal) : undefined
+  const scheduleCloneAbbreviation = scheduleCloneModal
+    ? buildUniqueScheduleAbbreviation(
+        scheduleCloneModal.shiftName,
+        companySchedules.map((item) => item.abbreviation),
+      )
+    : ''
   const liveScheduleAbbreviation = buildUniqueScheduleAbbreviation(
     scheduleForm.shiftName,
     companySchedules.map((item) => item.abbreviation),
@@ -2068,8 +2216,13 @@ function App() {
     }
 
     if (isCompanyModalOpen || activeSection === 'Empresa') {
+      const currentCompanyLinkedIds = currentCompany?.linkedCompanyIds ?? []
+      const normalizedCurrentLinkedIds = [...currentCompanyLinkedIds].sort((left, right) => left - right)
+      const normalizedFormLinkedIds = [...companyLinkedCompanyIds].sort((left, right) => left - right)
+
       return (
         JSON.stringify(companyForm) !== JSON.stringify(buildCompanyFormSnapshot(currentCompany, emptyCompanyForm)) ||
+        JSON.stringify(normalizedFormLinkedIds) !== JSON.stringify(normalizedCurrentLinkedIds) ||
         !!companyAgreementFeedback
       )
     }
@@ -4539,6 +4692,7 @@ function App() {
       state: company.state,
       collectiveAgreementId: company.collectiveAgreementId ? String(company.collectiveAgreementId) : '',
     })
+    setCompanyLinkedCompanyIds(company.linkedCompanyIds ?? [])
     setScaleViewMode(company.defaultScaleViewMode ?? 'week')
     setPrintIncludeExtras(company.defaultPrintIncludeExtras ?? false)
     setSelectedReportId(company.defaultReportId ?? 'scale-consolidated')
@@ -4667,6 +4821,7 @@ function App() {
       populateCompanyForm(targetCompany)
     } else {
       setCompanyForm(emptyCompanyForm)
+      setCompanyLinkedCompanyIds([])
     }
     setLoginError('')
   }
@@ -4726,10 +4881,15 @@ function App() {
         ? companyAgreementSuggestion?.id ?? null
         : Number(companyForm.collectiveAgreementId)
     const suggestedCollectiveAgreementId = companyAgreementSuggestion?.id ?? null
+    const nextCompanyId = getNextNumericId(companies)
+    const companyIdForSanitization = mode === 'create' ? nextCompanyId : currentCompanyId
+    const sanitizedLinkedCompanyIds = Array.from(
+      new Set(companyLinkedCompanyIds.filter((companyId) => companyId !== null && companyId !== companyIdForSanitization)),
+    )
 
     if (mode === 'create') {
       const newCompany: CompanyRecord = {
-        id: getNextNumericId(companies),
+        id: nextCompanyId,
         status: 'ATIVA',
         collectiveAgreementId,
         suggestedCollectiveAgreementId,
@@ -4738,6 +4898,7 @@ function App() {
         defaultReportId: 'scale-consolidated',
         defaultPrintIncludeExtras: false,
         allowPastScaleEdits: false,
+        linkedCompanyIds: sanitizedLinkedCompanyIds,
         tradeName: companyForm.tradeName.trim(),
         legalName: companyForm.legalName.trim(),
         cnpj: companyForm.cnpj.trim(),
@@ -4788,6 +4949,7 @@ function App() {
               defaultReportId: item.defaultReportId ?? 'scale-consolidated',
               defaultPrintIncludeExtras: item.defaultPrintIncludeExtras ?? false,
               allowPastScaleEdits: item.allowPastScaleEdits ?? false,
+              linkedCompanyIds: sanitizedLinkedCompanyIds,
               tradeName: companyForm.tradeName.trim(),
               legalName: companyForm.legalName.trim(),
               cnpj: companyForm.cnpj.trim(),
@@ -4824,7 +4986,14 @@ function App() {
       return
     }
 
-    setCompanies((current) => current.filter((item) => item.id !== companyId))
+    setCompanies((current) =>
+      current
+        .filter((item) => item.id !== companyId)
+        .map((item) => ({
+          ...item,
+          linkedCompanyIds: item.linkedCompanyIds.filter((linkedCompanyId) => linkedCompanyId !== companyId),
+        })),
+    )
     setSectors((current) => current.filter((item) => item.companyId !== companyId))
     setFunctions((current) => current.filter((item) => item.companyId !== companyId))
     setCollaborators((current) => current.filter((item) => item.companyId !== companyId))
@@ -4850,6 +5019,7 @@ function App() {
     if (currentCompanyId === companyId) {
       setCurrentCompanyId(null)
       setCompanyForm(emptyCompanyForm)
+      setCompanyLinkedCompanyIds([])
       resetForms()
     }
   }
@@ -4979,6 +5149,104 @@ function App() {
     setEditingAgreementId(null)
   }
 
+  function openFunctionCloneModal(functionId: number) {
+    if (!currentCompanyId) {
+      return
+    }
+
+    const sourceFunction = companyFunctions.find((item) => item.id === functionId && item.companyId !== currentCompanyId) ?? null
+    if (!sourceFunction) {
+      return
+    }
+
+    setFunctionCloneModal({
+      sourceFunctionId: sourceFunction.id,
+      name: buildUniqueLocalCloneName(sourceFunction.name, companyFunctions.map((item) => item.name)),
+      sector: sourceFunction.sector,
+      description: sourceFunction.description,
+      baseSalary: sourceFunction.baseSalary,
+      serviceQuota: sourceFunction.serviceQuota,
+      extraPayValue: sourceFunction.extraPayValue,
+    })
+  }
+
+  function closeFunctionCloneModal() {
+    setFunctionCloneModal(null)
+  }
+
+  function submitFunctionClone(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    if (!currentCompanyId || !functionCloneModal) {
+      return
+    }
+
+    const sourceFunction = companyFunctions.find((item) => item.id === functionCloneModal.sourceFunctionId) ?? null
+    if (!sourceFunction) {
+      setFunctionWarning(buildInvalidFunctionWarning(['A funcao de origem nao esta mais disponivel para clonagem.']))
+      setFunctionCloneModal(null)
+      return
+    }
+
+    const validationMessages: string[] = []
+    const resolvedSector = resolveCompanySectorName(sectors, currentCompanyId, functionCloneModal.sector)
+    const clonedFunction: FunctionRecord = {
+      id: getNextNumericId(functions),
+      companyId: currentCompanyId,
+      name: functionCloneModal.name.trim(),
+      sector: resolvedSector,
+      description: functionCloneModal.description.trim(),
+      baseSalary: functionCloneModal.baseSalary.trim(),
+      serviceQuota: functionCloneModal.serviceQuota.trim(),
+      extraPayValue: functionCloneModal.extraPayValue.trim(),
+      isActive: true,
+      inactivePeriods: [],
+    }
+
+    if (!clonedFunction.name) {
+      validationMessages.push('Informe o nome da copia local da funcao.')
+    }
+
+    if (!clonedFunction.sector) {
+      validationMessages.push('Informe o setor da copia local da funcao.')
+    }
+
+    if (!clonedFunction.description) {
+      validationMessages.push('Informe o descritivo da copia local da funcao.')
+    }
+
+    const duplicatedFunction = localCompanyFunctions.find(
+      (item) => item.name.trim().toLowerCase() === clonedFunction.name.toLowerCase(),
+    )
+    if (duplicatedFunction) {
+      validationMessages.push('Ja existe uma funcao local nesta empresa com esse nome.')
+    }
+
+    if (validationMessages.length > 0) {
+      setFunctionWarning(buildInvalidFunctionWarning(validationMessages))
+      return
+    }
+
+    ensureCompanySector(currentCompanyId, clonedFunction.sector)
+    setFunctions((current) => [clonedFunction, ...current])
+    setFunctionCloneModal(null)
+    setFunctionWarning(null)
+    if (currentSessionActor) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Funcao',
+        action: 'Clonagem',
+        targetType: 'Funcao',
+        targetLabel: clonedFunction.name,
+        severity: 'warning',
+        impactSummary: `Funcao clonada de ${getCompanyTradeNameById(sourceFunction.companyId)} para ${currentCompany?.tradeName ?? currentCompanyId}.`,
+        relatedCompanyIds: [sourceFunction.companyId, currentCompanyId],
+      })
+    }
+  }
+
   function handleFunctionSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
@@ -5018,7 +5286,7 @@ function App() {
       validationMessages.push('Informe o descritivo da funcao.')
     }
 
-    const duplicatedFunction = functions.find(
+    const duplicatedFunction = companyFunctions.find(
       (item) =>
         item.id !== editingFunctionId &&
         item.companyId === currentCompanyId &&
@@ -5224,6 +5492,150 @@ function App() {
     setIsCollaboratorModalOpen(false)
   }
 
+  function openScheduleCloneModal(scheduleId: number) {
+    if (!currentCompanyId) {
+      return
+    }
+
+    const sourceSchedule = companySchedules.find((item) => item.id === scheduleId && item.companyId !== currentCompanyId) ?? null
+    if (!sourceSchedule) {
+      return
+    }
+
+    setScheduleCloneModal({
+      sourceScheduleId: sourceSchedule.id,
+      shiftName: buildUniqueLocalCloneName(sourceSchedule.shiftName, companySchedules.map((item) => item.shiftName)),
+      startTime: sourceSchedule.startTime,
+      startPeriod: sourceSchedule.startPeriod,
+      breakStart: sourceSchedule.breakStart,
+      breakStartPeriod: sourceSchedule.breakStartPeriod,
+      breakEnd: sourceSchedule.breakEnd,
+      breakEndPeriod: sourceSchedule.breakEndPeriod,
+      endTime: sourceSchedule.endTime,
+      endPeriod: sourceSchedule.endPeriod,
+    })
+  }
+
+  function closeScheduleCloneModal() {
+    setScheduleCloneModal(null)
+  }
+
+  function persistClonedScheduleRecord(
+    sourceScheduleId: number,
+    cloneValues: ScheduleCloneModalState,
+    validation: ValidationResult,
+    abbreviation: string,
+  ) {
+    if (!currentCompanyId) {
+      return
+    }
+
+    const sourceSchedule = companySchedules.find((item) => item.id === sourceScheduleId) ?? null
+    const newItem: ScheduleRecord = {
+      id: schedules.reduce((max, item) => Math.max(max, item.id), 0) + 1,
+      companyId: currentCompanyId,
+      isActive: true,
+      inactivePeriods: [],
+      shiftName: cloneValues.shiftName.trim(),
+      abbreviation,
+      startTime: cloneValues.startTime,
+      startPeriod: cloneValues.startPeriod,
+      breakStart: cloneValues.breakStart,
+      breakStartPeriod: cloneValues.breakStartPeriod,
+      breakEnd: cloneValues.breakEnd,
+      breakEndPeriod: cloneValues.breakEndPeriod,
+      endTime: cloneValues.endTime,
+      endPeriod: cloneValues.endPeriod,
+      netMinutes: validation.netMinutes ?? 0,
+      validationMessage: validation.notes.join(' '),
+    }
+
+    pendingScheduleOverrideRef.current = null
+    setScheduleWarning(null)
+    setSchedules((current) => [newItem, ...current])
+    setScheduleCloneModal(null)
+    setScheduleFeedback(
+      buildSuccessfulScheduleFeedback(false, [
+        `Horario clonado de ${sourceSchedule ? getCompanyTradeNameById(sourceSchedule.companyId) : 'empresa vinculada'}.`,
+        ...validation.notes,
+      ], validation.netMinutes),
+    )
+    if (currentSessionActor && sourceSchedule) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Horario',
+        action: 'Clonagem',
+        targetType: 'Horario',
+        targetLabel: newItem.shiftName,
+        severity: 'warning',
+        impactSummary: `Horario clonado de ${getCompanyTradeNameById(sourceSchedule.companyId)} para ${currentCompany?.tradeName ?? currentCompanyId}.`,
+        relatedCompanyIds: [sourceSchedule.companyId, currentCompanyId],
+      })
+    }
+  }
+
+  function submitScheduleClone(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    if (!currentCompanyId || !scheduleCloneModal) {
+      return
+    }
+
+    const sourceSchedule = companySchedules.find((item) => item.id === scheduleCloneModal.sourceScheduleId) ?? null
+    if (!sourceSchedule) {
+      setScaleWarning(buildInvalidScheduleWarning(['O horario de origem nao esta mais disponivel para clonagem.']))
+      setScheduleCloneModal(null)
+      return
+    }
+
+    const validation = validateSchedule(scheduleCloneModal, currentCompany, currentAgreement)
+    const suggestedAbbreviation = buildUniqueScheduleAbbreviation(
+      scheduleCloneModal.shiftName,
+      companySchedules.map((item) => item.abbreviation),
+    )
+    const duplicateSchedule = companySchedules.find(
+      (item) =>
+        item.shiftName.trim().toLowerCase() === scheduleCloneModal.shiftName.trim().toLowerCase() &&
+        item.startTime === scheduleCloneModal.startTime &&
+        item.startPeriod === scheduleCloneModal.startPeriod &&
+        item.breakStart === scheduleCloneModal.breakStart &&
+        item.breakStartPeriod === scheduleCloneModal.breakStartPeriod &&
+        item.breakEnd === scheduleCloneModal.breakEnd &&
+        item.breakEndPeriod === scheduleCloneModal.breakEndPeriod &&
+        item.endTime === scheduleCloneModal.endTime &&
+        item.endPeriod === scheduleCloneModal.endPeriod,
+    )
+
+    if (duplicateSchedule) {
+      const duplicateFeedback = buildDuplicateScheduleFeedback()
+      setScheduleFeedback(duplicateFeedback)
+      setScaleWarning(buildInvalidScheduleWarning([...duplicateFeedback.errors, ...duplicateFeedback.notes]))
+      return
+    }
+
+    if (!validation.valid) {
+      setScheduleFeedback(validation)
+      if (validation.canOverride) {
+        const cloneSnapshot = { ...scheduleCloneModal }
+        pendingScheduleOverrideRef.current = () =>
+          persistClonedScheduleRecord(sourceSchedule.id, cloneSnapshot, validation, suggestedAbbreviation)
+        setScheduleWarning({
+          title: 'Horario clonado fora da CCT',
+          messages: [...validation.errors, ...validation.notes],
+          confirmLabel: 'Clonar mesmo assim',
+        })
+      } else {
+        pendingScheduleOverrideRef.current = null
+        setScaleWarning(buildInvalidScheduleWarning([...validation.errors, ...validation.notes]))
+      }
+      return
+    }
+
+    persistClonedScheduleRecord(sourceSchedule.id, scheduleCloneModal, validation, suggestedAbbreviation)
+  }
+
   function handleScheduleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
 
@@ -5234,7 +5646,7 @@ function App() {
       return
     }
 
-    const currentEditingSchedule = schedules.find((item) => item.id === editingScheduleId) ?? null
+    const currentEditingSchedule = localCompanySchedules.find((item) => item.id === editingScheduleId) ?? null
     const suggestedAbbreviation = buildUniqueScheduleAbbreviation(
       scheduleForm.shiftName,
       companySchedules.map((item) => item.abbreviation),
@@ -5337,7 +5749,7 @@ function App() {
   }
 
   function editSchedule(scheduleId: number) {
-    const targetSchedule = schedules.find((item) => item.id === scheduleId)
+    const targetSchedule = localCompanySchedules.find((item) => item.id === scheduleId)
     if (!targetSchedule) {
       return
     }
@@ -5349,7 +5761,7 @@ function App() {
   }
 
   function toggleScheduleActivation(scheduleId: number) {
-    const targetSchedule = schedules.find((item) => item.id === scheduleId)
+    const targetSchedule = localCompanySchedules.find((item) => item.id === scheduleId)
     if (!targetSchedule) {
       return
     }
@@ -5386,7 +5798,7 @@ function App() {
   }
 
   function deleteSchedule(scheduleId: number) {
-    const targetSchedule = schedules.find((item) => item.id === scheduleId) ?? null
+    const targetSchedule = localCompanySchedules.find((item) => item.id === scheduleId) ?? null
     if (!targetSchedule) {
       return
     }
@@ -5501,6 +5913,13 @@ function App() {
     const targetCompanyIds = Array.from(
       new Set([currentCompanyId, ...userForm.additionalCompanyIds.map((item) => Number(item)).filter(Boolean)]),
     )
+
+    const invalidLinkedCompanies = targetCompanyIds.filter(
+      (companyId) => !currentCompanyLinkScopeIds.includes(companyId),
+    )
+    if (invalidLinkedCompanies.length > 0) {
+      validationMessages.push('O login so pode ser vinculado a empresas autorizadas pela rede de empresas vinculadas.')
+    }
 
     if (userForm.role !== 'Visualizador') {
       const companiesWithoutSectors = targetCompanyIds
@@ -5752,7 +6171,7 @@ function App() {
   }
 
   function editFunction(functionId: number) {
-    const targetFunction = functions.find((item) => item.id === functionId)
+    const targetFunction = localCompanyFunctions.find((item) => item.id === functionId)
     if (!targetFunction) {
       return
     }
@@ -5763,7 +6182,7 @@ function App() {
   }
 
   function toggleFunctionActivation(functionId: number) {
-    const targetFunction = functions.find((item) => item.id === functionId)
+    const targetFunction = localCompanyFunctions.find((item) => item.id === functionId)
     if (!targetFunction) {
       return
     }
@@ -5800,7 +6219,7 @@ function App() {
   }
 
   function deleteFunction(functionId: number) {
-    const targetFunction = functions.find((item) => item.id === functionId)
+    const targetFunction = localCompanyFunctions.find((item) => item.id === functionId)
     if (!targetFunction) {
       return
     }
@@ -6017,6 +6436,7 @@ function App() {
           skipNextRemoteSyncRef.current = true
           applyAppStateSnapshot(payload.state)
           skipNextModuleSyncRef.current = {
+            companies: true,
             agreements: true,
             sectors: true,
             functions: true,
@@ -6030,6 +6450,7 @@ function App() {
             auditLogs: true,
           }
           const [
+            remoteCompanies,
             remoteAgreements,
             remoteSectors,
             remoteFunctions,
@@ -6042,6 +6463,7 @@ function App() {
             remoteUsers,
             remoteAuditLogs,
           ] = await Promise.all([
+            fetchModuleCollection<CompanyRecord>('companies'),
             fetchModuleCollection<CollectiveAgreementRecord>('agreements'),
             fetchModuleCollection<SectorRecord>('sectors'),
             fetchModuleCollection<FunctionRecord>('functions'),
@@ -6055,6 +6477,7 @@ function App() {
             fetchModuleCollection<AuditLogRecord>('auditLogs'),
           ])
           if (!cancelled) {
+            setCompanies(normalizeLinkedCompanyIdsInCollection(remoteCompanies))
             setAgreements(mergeSeedAgreements(remoteAgreements))
             setSectors(remoteSectors)
             setFunctions(
@@ -6214,6 +6637,21 @@ function App() {
   useEffect(() => {
     writeStoredValue(storageKeys.companies, companies)
   }, [companies])
+
+  useEffect(() => {
+    if (!isPersistenceReady || persistenceMode !== 'api') {
+      return
+    }
+
+    if (skipNextModuleSyncRef.current.companies) {
+      skipNextModuleSyncRef.current.companies = false
+      return
+    }
+
+    void persistModuleCollection('companies', companies).catch(() => {
+      setPersistenceMode('local')
+    })
+  }, [companies, isPersistenceReady, persistenceMode])
 
   useEffect(() => {
     writeStoredValue(storageKeys.agreements, agreements)
@@ -6727,7 +7165,8 @@ function App() {
                 onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
               />
             </label>
-            {companyAgreementField}
+                {companyLinksField}
+                {companyAgreementField}
             <div className="form-actions">
               <button type="submit" className="primary-button">
                 Salvar primeira empresa
@@ -6827,6 +7266,7 @@ function App() {
               className="secondary-button"
               onClick={() => {
                 setCompanyForm(emptyCompanyForm)
+                setCompanyLinkedCompanyIds([])
                 setIsCompanyModalOpen(true)
               }}
             >
@@ -6935,6 +7375,7 @@ function App() {
                     onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
                   />
                 </label>
+                {companyLinksField}
                 {companyAgreementField}
                 <div className="form-actions">
                   <button type="submit" className="primary-button">
@@ -7488,6 +7929,7 @@ function App() {
                       className="secondary-button"
                       onClick={() => {
                         setCompanyForm(emptyCompanyForm)
+                        setCompanyLinkedCompanyIds([])
                         setIsCompanyModalOpen(true)
                       }}
                     >
@@ -7602,7 +8044,8 @@ function App() {
                   onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
                 />
               </label>
-              {companyAgreementField}
+                {companyLinksField}
+                {companyAgreementField}
               <label>
                 Perfil de aplicacao da CCT
                 <select
@@ -8123,8 +8566,9 @@ function App() {
               onColumnOrderChange={setCollaboratorListColumnOrder}
               emptyMessage="Nenhum colaborador cadastrado ainda para esta empresa."
               exportFileName={`colaboradores-${slugifyFilePart(currentCompany?.tradeName ?? 'empresa')}.xlsx`}
-              renderActions={(item) => (
-                <div className="table-actions">
+              renderActions={(item) =>
+                item.companyId !== currentCompanyId ? null : (
+                  <div className="table-actions">
                   <button
                     type="button"
                     className="icon-button icon-edit"
@@ -8160,8 +8604,9 @@ function App() {
                       🗑
                     </button>
                   ) : null}
-                </div>
-              )}
+                  </div>
+                )
+              }
             />
           </section>
         )}
@@ -8174,7 +8619,7 @@ function App() {
                 <h2>Funcoes</h2>
               </div>
               <p className="section-note">
-                As funcoes abaixo estao vinculadas apenas a {currentCompany?.tradeName}.
+                As funcoes abaixo incluem a empresa atual e, quando houver, funcoes compartilhadas por empresas vinculadas.
               </p>
             </div>
             <form className="form-grid" onSubmit={handleFunctionSubmit}>
@@ -8260,39 +8705,53 @@ function App() {
               onColumnOrderChange={setFunctionListColumnOrder}
               emptyMessage="Nenhuma funcao cadastrada ainda para esta empresa."
               exportFileName={`funcoes-${slugifyFilePart(currentCompany?.tradeName ?? 'empresa')}.xlsx`}
-              renderActions={(item) => (
-                <div className="table-actions">
-                  <button
-                    type="button"
-                    className="icon-button icon-edit"
-                    onClick={() => editFunction(item.id)}
-                    aria-label={`Editar funcao ${item.name}`}
-                    title="Editar"
-                  >
-                    ✎
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-button icon-disable"
-                    onClick={() => toggleFunctionActivation(item.id)}
-                    aria-label={item.isActive ? `Inativar funcao ${item.name}` : `Ativar funcao ${item.name}`}
-                    title={item.isActive ? 'Inativar' : 'Ativar'}
-                  >
-                    {item.isActive ? '◐' : '◑'}
-                  </button>
-                  {(isSystemAdmin || session?.user.role === 'Gestor') ? (
+              renderActions={(item) =>
+                item.companyId !== currentCompanyId ? (
+                  <div className="table-actions">
                     <button
                       type="button"
-                      className="icon-button icon-delete"
-                      onClick={() => deleteFunction(item.id)}
-                      aria-label={`Excluir funcao ${item.name}`}
-                      title="Excluir"
+                      className="icon-button icon-edit"
+                      onClick={() => openFunctionCloneModal(item.id)}
+                      aria-label={`Clonar funcao ${item.name}`}
+                      title="Clonar para esta empresa"
                     >
-                      🗑
+                      ⧉
                     </button>
-                  ) : null}
-                </div>
-              )}
+                  </div>
+                ) : (
+                  <div className="table-actions">
+                    <button
+                      type="button"
+                      className="icon-button icon-edit"
+                      onClick={() => editFunction(item.id)}
+                      aria-label={`Editar funcao ${item.name}`}
+                      title="Editar"
+                    >
+                      ✎
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button icon-disable"
+                      onClick={() => toggleFunctionActivation(item.id)}
+                      aria-label={item.isActive ? `Inativar funcao ${item.name}` : `Ativar funcao ${item.name}`}
+                      title={item.isActive ? 'Inativar' : 'Ativar'}
+                    >
+                      {item.isActive ? '◐' : '◑'}
+                    </button>
+                    {(isSystemAdmin || session?.user.role === 'Gestor') ? (
+                      <button
+                        type="button"
+                        className="icon-button icon-delete"
+                        onClick={() => deleteFunction(item.id)}
+                        aria-label={`Excluir funcao ${item.name}`}
+                        title="Excluir"
+                      >
+                        🗑
+                      </button>
+                    ) : null}
+                  </div>
+                )
+              }
             />
           </section>
         )}
@@ -8305,7 +8764,7 @@ function App() {
                 <h2>Horarios</h2>
               </div>
               <p className="section-note">
-                Os horarios validados aqui ficam disponiveis apenas para {currentCompany?.tradeName}.
+                Os horarios validados aqui incluem a empresa atual e, quando houver, horarios compartilhados por empresas vinculadas.
               </p>
             </div>
 
@@ -8579,37 +9038,51 @@ function App() {
               onColumnOrderChange={setScheduleListColumnOrder}
               emptyMessage="Nenhum horario cadastrado ainda para esta empresa."
               exportFileName={`horarios-${slugifyFilePart(currentCompany?.tradeName ?? 'empresa')}.xlsx`}
-              renderActions={(item) => (
-                <div className="table-actions">
-                  <button
-                    type="button"
-                    className="icon-button icon-edit"
-                    onClick={() => editSchedule(item.id)}
-                    aria-label={`Editar horario ${item.shiftName}`}
-                    title="Editar"
-                  >
-                    ✎
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-button icon-disable"
-                    onClick={() => toggleScheduleActivation(item.id)}
-                    aria-label={item.isActive ? `Inativar horario ${item.shiftName}` : `Ativar horario ${item.shiftName}`}
-                    title={item.isActive ? 'Inativar' : 'Ativar'}
-                  >
-                    {item.isActive ? '◐' : '◑'}
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-button icon-delete"
-                    onClick={() => deleteSchedule(item.id)}
-                    aria-label={`Excluir horario ${item.shiftName}`}
-                    title="Excluir"
-                  >
-                    🗑
-                  </button>
-                </div>
-              )}
+              renderActions={(item) =>
+                item.companyId !== currentCompanyId ? (
+                  <div className="table-actions">
+                    <button
+                      type="button"
+                      className="icon-button icon-edit"
+                      onClick={() => openScheduleCloneModal(item.id)}
+                      aria-label={`Clonar horario ${item.shiftName}`}
+                      title="Clonar para esta empresa"
+                    >
+                      ⧉
+                    </button>
+                  </div>
+                ) : (
+                  <div className="table-actions">
+                    <button
+                      type="button"
+                      className="icon-button icon-edit"
+                      onClick={() => editSchedule(item.id)}
+                      aria-label={`Editar horario ${item.shiftName}`}
+                      title="Editar"
+                    >
+                      ✎
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button icon-disable"
+                      onClick={() => toggleScheduleActivation(item.id)}
+                      aria-label={item.isActive ? `Inativar horario ${item.shiftName}` : `Ativar horario ${item.shiftName}`}
+                      title={item.isActive ? 'Inativar' : 'Ativar'}
+                    >
+                      {item.isActive ? '◐' : '◑'}
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button icon-delete"
+                      onClick={() => deleteSchedule(item.id)}
+                      aria-label={`Excluir horario ${item.shiftName}`}
+                      title="Excluir"
+                    >
+                      🗑
+                    </button>
+                  </div>
+                )
+              }
             />
 
           </section>
@@ -10534,6 +11007,303 @@ function App() {
         </div>
       )}
 
+      {functionCloneModal && (
+        <div className="modal-backdrop" role="presentation" onClick={closeFunctionCloneModal}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="function-clone-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Clonagem assistida</p>
+                <h2 id="function-clone-title">Clonar funcao vinculada</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={closeFunctionCloneModal}>
+                Fechar
+              </button>
+            </div>
+            <form className="form-grid" onSubmit={submitFunctionClone}>
+              <div className="field-span helper-banner">
+                Esta copia sera criada como cadastro local editavel para {currentCompany?.tradeName ?? 'a empresa atual'}.
+              </div>
+              <label>
+                Nome da funcao <span className="required-marker">*</span>
+                <input
+                  required
+                  value={functionCloneModal.name}
+                  onChange={(event) =>
+                    setFunctionCloneModal((current) =>
+                      current === null ? current : { ...current, name: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Setor <span className="required-marker">*</span>
+                <input
+                  required
+                  value={functionCloneModal.sector}
+                  onChange={(event) =>
+                    setFunctionCloneModal((current) =>
+                      current === null ? current : { ...current, sector: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Base salarial
+                <input
+                  value={functionCloneModal.baseSalary}
+                  onChange={(event) =>
+                    setFunctionCloneModal((current) =>
+                      current === null ? current : { ...current, baseSalary: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Cota no servico
+                <input
+                  value={functionCloneModal.serviceQuota}
+                  onChange={(event) =>
+                    setFunctionCloneModal((current) =>
+                      current === null ? current : { ...current, serviceQuota: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Paga extra
+                <input
+                  value={functionCloneModal.extraPayValue}
+                  onChange={(event) =>
+                    setFunctionCloneModal((current) =>
+                      current === null ? current : { ...current, extraPayValue: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              <label className="field-span">
+                Descritivo <span className="required-marker">*</span>
+                <textarea
+                  required
+                  rows={5}
+                  value={functionCloneModal.description}
+                  onChange={(event) =>
+                    setFunctionCloneModal((current) =>
+                      current === null ? current : { ...current, description: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              <div className="form-actions">
+                <button type="button" className="secondary-button" onClick={closeFunctionCloneModal}>
+                  Cancelar
+                </button>
+                <button type="submit" className="primary-button">
+                  Criar copia local
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {scheduleCloneModal && (
+        <div className="modal-backdrop" role="presentation" onClick={closeScheduleCloneModal}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="schedule-clone-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Clonagem assistida</p>
+                <h2 id="schedule-clone-title">Clonar horario vinculado</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={closeScheduleCloneModal}>
+                Fechar
+              </button>
+            </div>
+            <form className="form-grid schedule-form" onSubmit={submitScheduleClone}>
+              <div className="field-span helper-banner">
+                Esta copia sera criada como horario local editavel para {currentCompany?.tradeName ?? 'a empresa atual'}.
+              </div>
+              <label>
+                Turno <span className="required-marker">*</span>
+                <input
+                  required
+                  value={scheduleCloneModal.shiftName}
+                  onChange={(event) =>
+                    setScheduleCloneModal((current) =>
+                      current === null ? current : { ...current, shiftName: event.target.value },
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Abreviacao sugerida
+                <input value={scheduleCloneAbbreviation} readOnly />
+              </label>
+              <label className="time-row">
+                Horario de inicio <span className="required-marker">*</span>
+                <div className="time-control">
+                  <input
+                    required
+                    placeholder="0000"
+                    inputMode="numeric"
+                    maxLength={5}
+                    value={scheduleCloneModal.startTime}
+                    onChange={(event) => {
+                      const normalized = normalizeTypedTime(event.target.value, scheduleCloneModal.startPeriod)
+                      setScheduleCloneModal((current) =>
+                        current === null
+                          ? current
+                          : { ...current, startTime: normalized.time, startPeriod: normalized.period },
+                      )
+                    }}
+                  />
+                  <select
+                    value={scheduleCloneModal.startPeriod}
+                    onChange={(event) =>
+                      setScheduleCloneModal((current) =>
+                        current === null ? current : { ...current, startPeriod: event.target.value as 'AM' | 'PM' },
+                      )
+                    }
+                  >
+                    <option value="AM">AM</option>
+                    <option value="PM">PM</option>
+                  </select>
+                </div>
+              </label>
+              <label className="time-row">
+                Inicio de pausa
+                <div className="time-control">
+                  <input
+                    placeholder="0000"
+                    inputMode="numeric"
+                    maxLength={5}
+                    value={scheduleCloneModal.breakStart}
+                    onChange={(event) => {
+                      const normalized = normalizeTypedTime(event.target.value, scheduleCloneModal.breakStartPeriod)
+                      setScheduleCloneModal((current) =>
+                        current === null
+                          ? current
+                          : { ...current, breakStart: normalized.time, breakStartPeriod: normalized.period },
+                      )
+                    }}
+                  />
+                  <select
+                    value={scheduleCloneModal.breakStartPeriod}
+                    onChange={(event) =>
+                      setScheduleCloneModal((current) =>
+                        current === null
+                          ? current
+                          : { ...current, breakStartPeriod: event.target.value as 'AM' | 'PM' },
+                      )
+                    }
+                  >
+                    <option value="AM">AM</option>
+                    <option value="PM">PM</option>
+                  </select>
+                </div>
+              </label>
+              <label className="time-row">
+                Fim de pausa
+                <div className="time-control">
+                  <input
+                    placeholder="0000"
+                    inputMode="numeric"
+                    maxLength={5}
+                    value={scheduleCloneModal.breakEnd}
+                    onChange={(event) => {
+                      const normalized = normalizeTypedTime(event.target.value, scheduleCloneModal.breakEndPeriod)
+                      setScheduleCloneModal((current) =>
+                        current === null
+                          ? current
+                          : { ...current, breakEnd: normalized.time, breakEndPeriod: normalized.period },
+                      )
+                    }}
+                  />
+                  <select
+                    value={scheduleCloneModal.breakEndPeriod}
+                    onChange={(event) =>
+                      setScheduleCloneModal((current) =>
+                        current === null
+                          ? current
+                          : { ...current, breakEndPeriod: event.target.value as 'AM' | 'PM' },
+                      )
+                    }
+                  >
+                    <option value="AM">AM</option>
+                    <option value="PM">PM</option>
+                  </select>
+                </div>
+              </label>
+              <label className="time-row">
+                Fim do turno <span className="required-marker">*</span>
+                <div className="time-control">
+                  <input
+                    required
+                    placeholder="0000"
+                    inputMode="numeric"
+                    maxLength={5}
+                    value={scheduleCloneModal.endTime}
+                    onChange={(event) => {
+                      const normalized = normalizeTypedTime(event.target.value, scheduleCloneModal.endPeriod)
+                      setScheduleCloneModal((current) =>
+                        current === null
+                          ? current
+                          : { ...current, endTime: normalized.time, endPeriod: normalized.period },
+                      )
+                    }}
+                  />
+                  <select
+                    value={scheduleCloneModal.endPeriod}
+                    onChange={(event) =>
+                      setScheduleCloneModal((current) =>
+                        current === null ? current : { ...current, endPeriod: event.target.value as 'AM' | 'PM' },
+                      )
+                    }
+                  >
+                    <option value="AM">AM</option>
+                    <option value="PM">PM</option>
+                  </select>
+                </div>
+              </label>
+              <div className="field-span helper-banner live-metric">
+                <strong>Horas trabalhadas calculadas em tempo real</strong>
+                <span>{scheduleCloneWorkedMinutes !== undefined ? formatWorkedHours(scheduleCloneWorkedMinutes) : '--:--'}</span>
+                {scheduleClonePreview && scheduleClonePreview.issues.length > 0 ? (
+                  <ul>
+                    {scheduleClonePreview.issues.map((issue) => (
+                      <li key={issue}>{issue}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <small>
+                    Preencha inicio e fim do turno. A pausa e opcional e, quando usada, precisa ter inicio e fim.
+                  </small>
+                )}
+              </div>
+              <div className="form-actions">
+                <button type="button" className="secondary-button" onClick={closeScheduleCloneModal}>
+                  Cancelar
+                </button>
+                <button type="submit" className="primary-button">
+                  Criar copia local
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
       {impactWarning && (
         <div className="modal-backdrop" role="presentation" onClick={closeImpactWarning}>
           <section
@@ -11138,7 +11908,8 @@ function App() {
                   onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
                 />
               </label>
-              {companyAgreementField}
+                {companyLinksField}
+                {companyAgreementField}
               <div className="form-actions">
                 <button type="submit" className="primary-button">
                   Salvar empresa

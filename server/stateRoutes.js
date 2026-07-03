@@ -1,7 +1,5 @@
-const { z } = require('zod')
-
 function registerStateRoutes(app, stateStore) {
-  const { appStateSchema, modularCollections } = stateStore
+  const { appStateSchema, collectionSchemas, modularCollections } = stateStore
 
   app.get('/api/state', async (_request, response) => {
     const state = await stateStore.getStoredState()
@@ -38,7 +36,8 @@ function registerStateRoutes(app, stateStore) {
     })
 
     app.put(`/api/${collectionKey}`, async (request, response) => {
-      const items = z.array(z.unknown()).parse(request.body?.items ?? request.body)
+      const collectionSchema = collectionSchemas[collectionKey]
+      const items = collectionSchema.parse(request.body?.items ?? request.body)
       const stored = await stateStore.updateStateCollection(collectionKey, items)
       response.json({
         ok: true,
