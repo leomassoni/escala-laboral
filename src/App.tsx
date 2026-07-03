@@ -1773,7 +1773,7 @@ function App() {
   const activeScaleBatchWeekDates =
     scaleBatchModal === null ? [] : getSafeWeekDates(scaleBatchModal.weekStart)
   const activeScaleBatchRows =
-    scaleBatchModal === null
+    scaleBatchModal === null || activeScaleBatchWeekDates.length !== 7
       ? []
       : getVisibleWeekRows(activeScaleBatchWeekDates).filter((item) =>
           scaleBatchModal.employmentScope === 'TODOS'
@@ -3629,6 +3629,10 @@ function App() {
   }
 
   function getVisibleWeekRows(weekDates: Date[]) {
+    if (weekDates.length !== 7 || weekDates.some((date) => Number.isNaN(date.getTime()))) {
+      return []
+    }
+
     const weekStartValue = toIsoDate(weekDates[0])
     const autoRows = visibleScaleCollaborators.filter((item) => {
       if (item.employmentType === 'EXTRA') {

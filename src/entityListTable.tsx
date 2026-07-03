@@ -66,6 +66,39 @@ export function EntityListTable<Row extends { id: number }>({
     setOpenColumnMenu((current) => (current && availableKeys.has(current) ? current : null))
   }, [columns])
 
+  useEffect(() => {
+    if (openColumnMenu === null) {
+      return
+    }
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target
+      if (!(target instanceof Element)) {
+        return
+      }
+
+      if (target.closest('.entity-column-menu') || target.closest('.entity-column-menu-trigger')) {
+        return
+      }
+
+      setOpenColumnMenu(null)
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setOpenColumnMenu(null)
+      }
+    }
+
+    window.addEventListener('mousedown', handlePointerDown)
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown)
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [openColumnMenu])
+
   const orderedColumns = useMemo(() => {
     const fallbackOrder = columns.map((column) => column.key)
     const resolvedOrder = columnOrder.length > 0 ? columnOrder : fallbackOrder
@@ -322,24 +355,23 @@ export function EntityListTable<Row extends { id: number }>({
                       className={index === 0 ? 'entity-primary-cell entity-header-cell' : 'entity-header-cell'}
                     >
                       <div className="entity-column-header">
-                        <div className="entity-column-header-copy">
-                          <strong>{column.label}</strong>
-                          <span className="entity-column-meta">
-                            Arraste para reordenar
-                            {columnSortState ? ` • ${columnSortState === 'asc' ? 'A-Z' : 'Z-A'}` : ''}
-                            {selectedValues.length > 0 ? ` • ${selectedValues.length} filtro(s)` : ''}
-                          </span>
+                        <strong>{column.label}</strong>
+                        <div className="entity-column-header-actions">
+                          {selectedValues.length > 0 ? (
+                            <span className="entity-column-filter-count">{selectedValues.length}</span>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="entity-column-menu-trigger"
+                            onClick={() =>
+                              setOpenColumnMenu((current) => (current === column.key ? null : column.key))
+                            }
+                            aria-label={`Abrir opcoes da coluna ${column.label}`}
+                            title={`Abrir opcoes da coluna ${column.label}`}
+                          >
+                            ▼
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          className="ghost-button entity-column-menu-trigger"
-                          onClick={() =>
-                            setOpenColumnMenu((current) => (current === column.key ? null : column.key))
-                          }
-                          aria-label={`Abrir opcoes da coluna ${column.label}`}
-                        >
-                          ⋮
-                        </button>
                         {openColumnMenu === column.key ? (
                           <div className="entity-column-menu" onClick={(event) => event.stopPropagation()}>
                             <div className="entity-column-menu-actions">
@@ -369,6 +401,11 @@ export function EntityListTable<Row extends { id: number }>({
                               </button>
                             </div>
                             <div className="entity-column-menu-values">
+                              {columnSortState ? (
+                                <span className="field-helper">
+                                  Ordenacao ativa: {columnSortState === 'asc' ? 'A-Z' : 'Z-A'}
+                                </span>
+                              ) : null}
                               <strong>Filtrar valores</strong>
                               {distinctValuesByColumn[column.key]?.length ? (
                                 distinctValuesByColumn[column.key].map((value) => (
