@@ -375,29 +375,51 @@ export function EntityListTable<Row extends { id: number }>({
                         {openColumnMenu === column.key ? (
                           <div className="entity-column-menu" onClick={(event) => event.stopPropagation()}>
                             <div className="entity-column-menu-actions">
-                              <button type="button" className="ghost-button" onClick={() => setSort(column.key, 'asc')}>
-                                Ordenar A-Z
-                              </button>
-                              <button type="button" className="ghost-button" onClick={() => setSort(column.key, 'desc')}>
-                                Ordenar Z-A
-                              </button>
-                              <button type="button" className="ghost-button" onClick={() => clearColumnFilter(column.key)}>
-                                Limpar filtro
-                              </button>
                               <button
                                 type="button"
-                                className="ghost-button"
-                                onClick={() => setSortState((current) => (current?.columnKey === column.key ? null : current))}
+                                className="ghost-button entity-column-menu-icon-action"
+                                onClick={() => setSort(column.key, 'asc')}
+                                aria-label={`Ordenar coluna ${column.label} de A a Z`}
+                                title={`Ordenar coluna ${column.label} de A a Z`}
                               >
-                                Remover ordenacao
+                                ↑
                               </button>
                               <button
                                 type="button"
-                                className="ghost-button"
+                                className="ghost-button entity-column-menu-icon-action"
+                                onClick={() => setSort(column.key, 'desc')}
+                                aria-label={`Ordenar coluna ${column.label} de Z a A`}
+                                title={`Ordenar coluna ${column.label} de Z a A`}
+                              >
+                                ↓
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-button entity-column-menu-icon-action"
+                                onClick={() => clearColumnFilter(column.key)}
+                                aria-label={`Limpar filtros da coluna ${column.label}`}
+                                title={`Limpar filtros da coluna ${column.label}`}
+                              >
+                                🧹
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-button entity-column-menu-icon-action"
+                                onClick={() => setSortState((current) => (current?.columnKey === column.key ? null : current))}
+                                aria-label={`Remover ordenacao da coluna ${column.label}`}
+                                title={`Remover ordenacao da coluna ${column.label}`}
+                              >
+                                ✕
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-button entity-column-menu-icon-action"
                                 onClick={() => hideColumn(column.key)}
                                 disabled={visibleColumnKeys.length <= 1}
+                                aria-label={`Ocultar coluna ${column.label}`}
+                                title={`Ocultar coluna ${column.label}`}
                               >
-                                Ocultar coluna
+                                👁
                               </button>
                             </div>
                             <div className="entity-column-menu-values">

@@ -280,6 +280,16 @@ type ScaleBatchRuntimeState = {
   errorMessage: string | null
 }
 
+type ImpactWarningState = {
+  title: string
+  messages: string[]
+  confirmLabel: string
+  replacementLabel?: string
+  replacementPlaceholder?: string
+  replacementValue: string
+  replacementOptions: Array<{ value: string; label: string }>
+}
+
 const collaboratorListDefaultColumnOrder = [
   'nome',
   'cpf',
@@ -1203,6 +1213,7 @@ function App() {
   const pendingDiscardActionRef = useRef<(() => void) | null>(null)
   const pendingScaleReplicationRef = useRef<(() => void) | null>(null)
   const pendingScaleBatchRef = useRef<(() => void) | null>(null)
+  const pendingImpactActionRef = useRef<((replacementValue: string) => void) | null>(null)
   const [session, setSession] = useState<Session | null>(() =>
     readStoredValue<Session | null>(storageKeys.session, null),
   )
@@ -1228,6 +1239,7 @@ function App() {
   const [collaboratorWarning, setCollaboratorWarning] = useState<{ title: string; messages: string[] } | null>(null)
   const [functionWarning, setFunctionWarning] = useState<{ title: string; messages: string[] } | null>(null)
   const [userWarning, setUserWarning] = useState<{ title: string; messages: string[] } | null>(null)
+  const [impactWarning, setImpactWarning] = useState<ImpactWarningState | null>(null)
   const [discardWarning, setDiscardWarning] = useState<{ title: string; message: string } | null>(null)
   const [collaboratorListSearch, setCollaboratorListSearch] = useState('')
   const [functionListSearch, setFunctionListSearch] = useState('')
@@ -2635,11 +2647,90 @@ function App() {
       .join(', ')
   }
 
-  function confirmCollaboratorActivationChange(collaborator: CollaboratorRecord) {
-    if (!collaborator.isActive || typeof window === 'undefined') {
-      return true
-    }
+  function closeImpactWarning() {
+    pendingImpactActionRef.current = null
+    setImpactWarning(null)
+  }
 
+  function confirmImpactWarning() {
+    const pendingAction = pendingImpactActionRef.current
+    const replacementValue = impactWarning?.replacementValue ?? ''
+    pendingImpactActionRef.current = null
+    setImpactWarning(null)
+    pendingAction?.(replacementValue)
+  }
+
+  function openImpactWarning(
+    warning: Omit<ImpactWarningState, 'replacementValue'> & { replacementValue?: string },
+    onConfirm: (replacementValue: string) => void,
+  ) {
+    pendingImpactActionRef.current = onConfirm
+    setImpactWarning({
+      ...warning,
+      replacementValue: warning.replacementValue ?? '',
+    })
+  }
+
+  function replaceFunctionOnCollaborators(
+    current: CollaboratorRecord[],
+    targetFunctionName: string,
+    replacementFunctionName: string,
+  ) {
+    return current.map((item) => {
+      if (item.companyId !== currentCompanyId || !item.functions.includes(targetFunctionName)) {
+        return item
+      }
+
+      const nextFunctions = item.functions.map((functionName) =>
+        functionName === targetFunctionName ? replacementFunctionName : functionName,
+      )
+
+      return {
+        ...item,
+        functions: Array.from(new Set(nextFunctions)),
+        primaryFunction:
+          item.primaryFunction === targetFunctionName ? replacementFunctionName : item.primaryFunction,
+      }
+    })
+  }
+
+  function replaceScheduleOnAssignments(
+    current: ScaleAssignmentRecord[],
+    targetScheduleId: number,
+    replacementScheduleId: number,
+    datePredicate?: (date: string) => boolean,
+  ) {
+    return current.map((item) => {
+      if (item.companyId !== currentCompanyId || item.scheduleId !== targetScheduleId) {
+        return item
+      }
+
+      if (datePredicate && !datePredicate(item.date)) {
+        return item
+      }
+
+      return {
+        ...item,
+        scheduleId: replacementScheduleId,
+      }
+    })
+  }
+
+  function buildFunctionReplacementOptions(targetFunction: FunctionRecord) {
+    return companyFunctions
+      .filter((item) => item.id !== targetFunction.id && item.isActive)
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map((item) => ({ value: item.name, label: `${item.name} • ${item.sector || 'Sem setor'}` }))
+  }
+
+  function buildScheduleReplacementOptions(targetSchedule: ScheduleRecord) {
+    return companySchedules
+      .filter((item) => item.id !== targetSchedule.id && item.isActive)
+      .sort((left, right) => left.shiftName.localeCompare(right.shiftName))
+      .map((item) => ({ value: String(item.id), label: `${item.shiftName} (${item.abbreviation})` }))
+  }
+
+  function requestCollaboratorActivationImpact(collaborator: CollaboratorRecord, onConfirm: () => void) {
     const today = toIsoDate(new Date())
     const affectedScaleDates = companyScaleAssignments
       .filter((item) => item.collaboratorId === collaborator.id && item.date >= today)
@@ -2649,6 +2740,10 @@ function App() {
       .filter((item) => item.collaboratorId === collaborator.id && item.weekStart >= today)
       .map((item) => item.weekStart)
       .sort()
+    const linkedUsers = companyUsers
+      .filter((item) => item.linkedCollaboratorId === collaborator.id)
+      .map((item) => item.fullName)
+      .sort((left, right) => left.localeCompare(right))
     const messages = [
       `Inativar este colaborador o retira das novas escolhas na Escala a partir de ${formatDateLabel(today)}.`,
     ]
@@ -2665,19 +2760,76 @@ function App() {
       )
     }
 
-    return window.confirm(messages.join('\n\n'))
-  }
-
-  function confirmScheduleActivationChange(schedule: ScheduleRecord) {
-    if (!schedule.isActive || typeof window === 'undefined') {
-      return true
+    if (linkedUsers.length > 0) {
+      messages.push(
+        `Usuarios vinculados: ${linkedUsers.slice(0, 6).join(', ')}${linkedUsers.length > 6 ? '...' : ''}. O vinculo sera mantido, mas sem novas escolhas para este colaborador.`,
+      )
     }
 
+    openImpactWarning(
+      {
+        title: 'Impacto da inativacao do colaborador',
+        messages,
+        confirmLabel: 'Continuar inativacao',
+        replacementOptions: [],
+      },
+      () => onConfirm(),
+    )
+  }
+
+  function requestCollaboratorDeletionImpact(collaborator: CollaboratorRecord, onConfirm: () => void) {
+    const assignments = companyScaleAssignments
+      .filter((item) => item.collaboratorId === collaborator.id)
+      .map((item) => item.date)
+      .sort()
+    const extraWeeks = companyScaleExtraRoster
+      .filter((item) => item.collaboratorId === collaborator.id)
+      .map((item) => item.weekStart)
+      .sort()
+    const linkedUsers = companyUsers
+      .filter((item) => item.linkedCollaboratorId === collaborator.id)
+      .map((item) => item.fullName)
+      .sort((left, right) => left.localeCompare(right))
+    const messages = [
+      'Excluir este colaborador remove o cadastro da empresa e tambem apaga suas escalas relacionadas.',
+    ]
+
+    if (assignments.length > 0) {
+      messages.push(
+        `Escalas removidas: ${formatAffectedDates(assignments)}${assignments.length > 6 ? '...' : ''}.`,
+      )
+    }
+
+    if (extraWeeks.length > 0) {
+      messages.push(
+        `Semanas EXTRA removidas: ${formatAffectedDates(extraWeeks)}${extraWeeks.length > 6 ? '...' : ''}.`,
+      )
+    }
+
+    if (linkedUsers.length > 0) {
+      messages.push(
+        `Usuarios desvinculados: ${linkedUsers.slice(0, 6).join(', ')}${linkedUsers.length > 6 ? '...' : ''}.`,
+      )
+    }
+
+    openImpactWarning(
+      {
+        title: 'Impacto da exclusao do colaborador',
+        messages,
+        confirmLabel: 'Excluir colaborador',
+        replacementOptions: [],
+      },
+      () => onConfirm(),
+    )
+  }
+
+  function requestScheduleActivationImpact(schedule: ScheduleRecord, onConfirm: (replacementScheduleId: number | null) => void) {
     const today = toIsoDate(new Date())
     const affectedScaleDates = companyScaleAssignments
       .filter((item) => item.scheduleId === schedule.id && item.date >= today)
       .map((item) => item.date)
       .sort()
+    const replacementOptions = buildScheduleReplacementOptions(schedule)
     const messages = [
       `Inativar este horario o retira das novas escolhas na Escala a partir de ${formatDateLabel(today)}.`,
     ]
@@ -2688,18 +2840,68 @@ function App() {
       )
     }
 
-    return window.confirm(messages.join('\n\n'))
-  }
-
-  function confirmFunctionActivationChange(targetFunction: FunctionRecord) {
-    if (!targetFunction.isActive || typeof window === 'undefined') {
-      return true
+    if (replacementOptions.length > 0) {
+      messages.push('Se desejar, substitua agora esse horario nas escalas futuras que ainda o utilizam.')
     }
 
+    openImpactWarning(
+      {
+        title: 'Impacto da inativacao do horario',
+        messages,
+        confirmLabel: 'Continuar inativacao',
+        replacementLabel: replacementOptions.length > 0 ? 'Substituir horario futuro por' : undefined,
+        replacementPlaceholder: replacementOptions.length > 0 ? 'Manter horarios ja lancados' : undefined,
+        replacementOptions,
+      },
+      (replacementValue) => {
+        const numericReplacementId = Number(replacementValue)
+        onConfirm(Number.isNaN(numericReplacementId) || numericReplacementId <= 0 ? null : numericReplacementId)
+      },
+    )
+  }
+
+  function requestScheduleDeletionImpact(schedule: ScheduleRecord, onConfirm: (replacementScheduleId: number | null) => void) {
+    const affectedScaleDates = companyScaleAssignments
+      .filter((item) => item.scheduleId === schedule.id)
+      .map((item) => item.date)
+      .sort()
+    const replacementOptions = buildScheduleReplacementOptions(schedule)
+    const messages = [
+      'Excluir este horario remove o cadastro e tambem limpa as escalas que ainda apontam para ele.',
+    ]
+
+    if (affectedScaleDates.length > 0) {
+      messages.push(
+        `Escalas afetadas: ${formatAffectedDates(affectedScaleDates)}${affectedScaleDates.length > 6 ? '...' : ''}.`,
+      )
+    }
+
+    if (replacementOptions.length > 0) {
+      messages.push('Se desejar, substitua agora esse horario nas escalas afetadas antes de concluir a exclusao.')
+    }
+
+    openImpactWarning(
+      {
+        title: 'Impacto da exclusao do horario',
+        messages,
+        confirmLabel: 'Excluir horario',
+        replacementLabel: replacementOptions.length > 0 ? 'Substituir horario em escalas afetadas por' : undefined,
+        replacementPlaceholder: replacementOptions.length > 0 ? 'Remover horario das escalas afetadas' : undefined,
+        replacementOptions,
+      },
+      (replacementValue) => {
+        const numericReplacementId = Number(replacementValue)
+        onConfirm(Number.isNaN(numericReplacementId) || numericReplacementId <= 0 ? null : numericReplacementId)
+      },
+    )
+  }
+
+  function requestFunctionActivationImpact(targetFunction: FunctionRecord, onConfirm: (replacementFunctionName: string | null) => void) {
     const affectedCollaborators = companyCollaborators
       .filter((item) => item.functions.includes(targetFunction.name))
       .map((item) => getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf)
       .sort((left, right) => left.localeCompare(right))
+    const replacementOptions = buildFunctionReplacementOptions(targetFunction)
     const messages = [
       'Inativar esta funcao a retira das novas escolhas no cadastro de colaboradores.',
     ]
@@ -2710,9 +2912,55 @@ function App() {
       )
     }
 
-    return window.confirm(messages.join('\n\n'))
+    if (replacementOptions.length > 0) {
+      messages.push('Se desejar, substitua agora esta funcao nos colaboradores que ainda a utilizam.')
+    }
+
+    openImpactWarning(
+      {
+        title: 'Impacto da inativacao da funcao',
+        messages,
+        confirmLabel: 'Continuar inativacao',
+        replacementLabel: replacementOptions.length > 0 ? 'Substituir funcao em colaboradores por' : undefined,
+        replacementPlaceholder: replacementOptions.length > 0 ? 'Manter funcao atual nos colaboradores' : undefined,
+        replacementOptions,
+      },
+      (replacementValue) => onConfirm(replacementValue || null),
+    )
   }
 
+  function requestFunctionDeletionImpact(targetFunction: FunctionRecord, onConfirm: (replacementFunctionName: string | null) => void) {
+    const affectedCollaborators = companyCollaborators
+      .filter((item) => item.functions.includes(targetFunction.name))
+      .map((item) => getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf)
+      .sort((left, right) => left.localeCompare(right))
+    const replacementOptions = buildFunctionReplacementOptions(targetFunction)
+    const messages = [
+      'Excluir esta funcao remove o cadastro e atualiza os colaboradores que ainda a utilizam.',
+    ]
+
+    if (affectedCollaborators.length > 0) {
+      messages.push(
+        `Colaboradores afetados: ${affectedCollaborators.slice(0, 6).join(', ')}${affectedCollaborators.length > 6 ? '...' : ''}.`,
+      )
+    }
+
+    if (replacementOptions.length > 0) {
+      messages.push('Se desejar, substitua agora esta funcao antes de concluir a exclusao.')
+    }
+
+    openImpactWarning(
+      {
+        title: 'Impacto da exclusao da funcao',
+        messages,
+        confirmLabel: 'Excluir funcao',
+        replacementLabel: replacementOptions.length > 0 ? 'Substituir funcao em colaboradores por' : undefined,
+        replacementPlaceholder: replacementOptions.length > 0 ? 'Remover funcao dos colaboradores afetados' : undefined,
+        replacementOptions,
+      },
+      (replacementValue) => onConfirm(replacementValue || null),
+    )
+  }
   function getAssignmentForDay(collaboratorId: number, date: string) {
     return companyScaleAssignments.find(
       (item) => item.collaboratorId === collaboratorId && item.date === date,
@@ -5106,33 +5354,57 @@ function App() {
       return
     }
 
-    if (!confirmScheduleActivationChange(targetSchedule)) {
+    const today = toIsoDate(new Date())
+    const applyToggle = (replacementScheduleId: number | null) => {
+      setSchedules((current) =>
+        current.map((item) =>
+          item.id === scheduleId
+            ? {
+                ...item,
+                isActive: !item.isActive,
+                inactivePeriods: item.isActive
+                  ? startInactivePeriod(item.inactivePeriods, today)
+                  : endInactivePeriod(item.inactivePeriods, today),
+              }
+            : item,
+        ),
+      )
+
+      if (targetSchedule.isActive && replacementScheduleId !== null) {
+        setScaleAssignments((current) =>
+          replaceScheduleOnAssignments(current, scheduleId, replacementScheduleId, (date) => date >= today),
+        )
+      }
+    }
+
+    if (!targetSchedule.isActive) {
+      applyToggle(null)
       return
     }
 
-    const today = toIsoDate(new Date())
-    setSchedules((current) =>
-      current.map((item) =>
-        item.id === scheduleId
-          ? {
-              ...item,
-              isActive: !item.isActive,
-              inactivePeriods: item.isActive
-                ? startInactivePeriod(item.inactivePeriods, today)
-                : endInactivePeriod(item.inactivePeriods, today),
-            }
-          : item,
-      ),
-    )
+    requestScheduleActivationImpact(targetSchedule, applyToggle)
   }
 
   function deleteSchedule(scheduleId: number) {
-    setSchedules((current) => current.filter((item) => item.id !== scheduleId))
-    if (editingScheduleId === scheduleId) {
-      setScheduleForm(emptyScheduleForm)
-      setEditingScheduleId(null)
+    const targetSchedule = schedules.find((item) => item.id === scheduleId) ?? null
+    if (!targetSchedule) {
+      return
     }
-    setScheduleFeedback(buildDeletedScheduleFeedback())
+
+    requestScheduleDeletionImpact(targetSchedule, (replacementScheduleId) => {
+      if (replacementScheduleId !== null) {
+        setScaleAssignments((current) => replaceScheduleOnAssignments(current, scheduleId, replacementScheduleId))
+      } else {
+        setScaleAssignments((current) => current.filter((item) => item.scheduleId !== scheduleId))
+      }
+
+      setSchedules((current) => current.filter((item) => item.id !== scheduleId))
+      if (editingScheduleId === scheduleId) {
+        setScheduleForm(emptyScheduleForm)
+        setEditingScheduleId(null)
+      }
+      setScheduleFeedback(buildDeletedScheduleFeedback())
+    })
   }
 
   function toggleUserAdditionalCompany(companyId: string) {
@@ -5404,25 +5676,30 @@ function App() {
       return
     }
 
-    if (!confirmCollaboratorActivationChange(targetCollaborator)) {
+    const today = toIsoDate(new Date())
+    const applyToggle = () => {
+      setCollaborators((current) =>
+        current.map((item) =>
+          item.id === collaboratorId
+            ? {
+                ...item,
+                isActive: !item.isActive,
+                inactiveSince: item.isActive ? today : null,
+                inactivePeriods: item.isActive
+                  ? startInactivePeriod(item.inactivePeriods, today)
+                  : endInactivePeriod(item.inactivePeriods, today),
+              }
+            : item,
+        ),
+      )
+    }
+
+    if (!targetCollaborator.isActive) {
+      applyToggle()
       return
     }
 
-    const today = toIsoDate(new Date())
-    setCollaborators((current) =>
-      current.map((item) =>
-        item.id === collaboratorId
-          ? {
-              ...item,
-              isActive: !item.isActive,
-              inactiveSince: item.isActive ? today : null,
-              inactivePeriods: item.isActive
-                ? startInactivePeriod(item.inactivePeriods, today)
-                : endInactivePeriod(item.inactivePeriods, today),
-            }
-          : item,
-      ),
-    )
+    requestCollaboratorActivationImpact(targetCollaborator, applyToggle)
   }
 
   function editCollaborator(collaboratorId: number) {
@@ -5445,14 +5722,26 @@ function App() {
       return
     }
 
-    setCollaborators((current) => current.filter((item) => item.id !== collaboratorId))
-    setScaleAssignments((current) => current.filter((item) => item.collaboratorId !== collaboratorId))
-    setScaleExtraRoster((current) => current.filter((item) => item.collaboratorId !== collaboratorId))
+    requestCollaboratorDeletionImpact(targetCollaborator, () => {
+      setCollaborators((current) => current.filter((item) => item.id !== collaboratorId))
+      setScaleAssignments((current) => current.filter((item) => item.collaboratorId !== collaboratorId))
+      setScaleExtraRoster((current) => current.filter((item) => item.collaboratorId !== collaboratorId))
+      setUsers((current) =>
+        current.map((item) =>
+          item.linkedCollaboratorId === collaboratorId
+            ? {
+                ...item,
+                linkedCollaboratorId: null,
+              }
+            : item,
+        ),
+      )
 
-    if (currentCompanyCollaborator?.id === collaboratorId) {
-      setCollaboratorForm(emptyCollaboratorForm)
-      setCollaboratorLookupFeedback('')
-    }
+      if (currentCompanyCollaborator?.id === collaboratorId) {
+        setCollaboratorForm(emptyCollaboratorForm)
+        setCollaboratorLookupFeedback('')
+      }
+    })
   }
 
   function openFunctionModal(prefillName = '') {
@@ -5479,24 +5768,35 @@ function App() {
       return
     }
 
-    if (!confirmFunctionActivationChange(targetFunction)) {
+    const today = toIsoDate(new Date())
+    const applyToggle = (replacementFunctionName: string | null) => {
+      setFunctions((current) =>
+        current.map((item) =>
+          item.id === functionId
+            ? {
+                ...item,
+                isActive: !item.isActive,
+                inactivePeriods: item.isActive
+                  ? startInactivePeriod(item.inactivePeriods, today)
+                  : endInactivePeriod(item.inactivePeriods, today),
+              }
+            : item,
+        ),
+      )
+
+      if (targetFunction.isActive && replacementFunctionName) {
+        setCollaborators((current) =>
+          replaceFunctionOnCollaborators(current, targetFunction.name, replacementFunctionName),
+        )
+      }
+    }
+
+    if (!targetFunction.isActive) {
+      applyToggle(null)
       return
     }
 
-    const today = toIsoDate(new Date())
-    setFunctions((current) =>
-      current.map((item) =>
-        item.id === functionId
-          ? {
-              ...item,
-              isActive: !item.isActive,
-              inactivePeriods: item.isActive
-                ? startInactivePeriod(item.inactivePeriods, today)
-                : endInactivePeriod(item.inactivePeriods, today),
-            }
-          : item,
-      ),
-    )
+    requestFunctionActivationImpact(targetFunction, applyToggle)
   }
 
   function deleteFunction(functionId: number) {
@@ -5505,15 +5805,21 @@ function App() {
       return
     }
 
-    setFunctions((current) => current.filter((item) => item.id !== functionId))
-    setCollaborators((current) => removeFunctionFromCollaborators(current, targetFunction))
+    requestFunctionDeletionImpact(targetFunction, (replacementFunctionName) => {
+      setFunctions((current) => current.filter((item) => item.id !== functionId))
+      setCollaborators((current) =>
+        replacementFunctionName
+          ? replaceFunctionOnCollaborators(current, targetFunction.name, replacementFunctionName)
+          : removeFunctionFromCollaborators(current, targetFunction),
+      )
 
-    if (editingFunctionId === functionId) {
-      setFunctionForm(emptyFunctionForm)
-      setEditingFunctionId(null)
-      setFunctionSuggestion('')
-      setIsFunctionModalOpen(false)
-    }
+      if (editingFunctionId === functionId) {
+        setFunctionForm(emptyFunctionForm)
+        setEditingFunctionId(null)
+        setFunctionSuggestion('')
+        setIsFunctionModalOpen(false)
+      }
+    })
   }
 
   function changeCollaboratorCpf(value: string) {
@@ -10224,6 +10530,72 @@ function App() {
                 </button>
               </div>
             </form>
+          </section>
+        </div>
+      )}
+
+      {impactWarning && (
+        <div className="modal-backdrop" role="presentation" onClick={closeImpactWarning}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="impact-warning-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Impacto da operacao</p>
+                <h2 id="impact-warning-title">{impactWarning.title}</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={closeImpactWarning}>
+                Fechar
+              </button>
+            </div>
+
+            <div className="feedback warning impact-warning-copy">
+              <strong>Revise o impacto antes de continuar.</strong>
+              <ul>
+                {impactWarning.messages.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            </div>
+
+            {impactWarning.replacementOptions.length > 0 ? (
+              <label className="impact-warning-replacement">
+                {impactWarning.replacementLabel ?? 'Substituir por'}
+                <select
+                  value={impactWarning.replacementValue}
+                  onChange={(event) =>
+                    setImpactWarning((current) =>
+                      current === null
+                        ? current
+                        : {
+                            ...current,
+                            replacementValue: event.target.value,
+                          },
+                    )
+                  }
+                >
+                  <option value="">{impactWarning.replacementPlaceholder ?? 'Nao substituir'}</option>
+                  {impactWarning.replacementOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+
+            <div className="form-actions">
+              <button type="button" className="secondary-button" onClick={closeImpactWarning}>
+                Cancelar
+              </button>
+              <button type="button" className="primary-button" onClick={confirmImpactWarning}>
+                {impactWarning.confirmLabel}
+              </button>
+            </div>
           </section>
         </div>
       )}
