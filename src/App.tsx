@@ -274,6 +274,12 @@ type ScaleBatchModalState = {
   overwriteExisting: boolean
 }
 
+type ScaleBatchRuntimeState = {
+  weekDates: Date[]
+  targetRows: CollaboratorRecord[]
+  errorMessage: string | null
+}
+
 const collaboratorListDefaultColumnOrder = [
   'nome',
   'cpf',
@@ -1770,16 +1776,12 @@ function App() {
   )
     .map(([, value]) => value)
     .sort((left, right) => left.weekStart.localeCompare(right.weekStart))
-  const activeScaleBatchWeekDates =
-    scaleBatchModal === null ? [] : getSafeWeekDates(scaleBatchModal.weekStart)
-  const activeScaleBatchRows =
-    scaleBatchModal === null || activeScaleBatchWeekDates.length !== 7
-      ? []
-      : getVisibleWeekRows(activeScaleBatchWeekDates).filter((item) =>
-          scaleBatchModal.employmentScope === 'TODOS'
-            ? true
-            : item.employmentType === scaleBatchModal.employmentScope,
-        )
+  const activeScaleBatchState = scaleBatchModal
+    ? resolveScaleBatchRuntimeState(scaleBatchModal)
+    : { weekDates: [], targetRows: [], errorMessage: null as string | null }
+  const activeScaleBatchWeekDates = activeScaleBatchState.weekDates
+  const activeScaleBatchRows = activeScaleBatchState.targetRows
+  const activeScaleBatchErrorMessage = activeScaleBatchState.errorMessage
   const companyAgreementField = (
     <>
       <div className="field-span agreement-panel">
@@ -3628,6 +3630,40 @@ function App() {
     return getMonthWeeks(scaleMonth)
   }
 
+  function resolveScaleBatchRuntimeState(modalState: ScaleBatchModalState): ScaleBatchRuntimeState {
+    const weekDates = getSafeWeekDates(modalState.weekStart)
+    if (weekDates.length !== 7) {
+      return {
+        weekDates: [],
+        targetRows: [],
+        errorMessage: 'A semana selecionada ficou invalida para a operacao em lote.',
+      }
+    }
+
+    try {
+      const targetRows = getVisibleWeekRows(weekDates).filter((item) =>
+        modalState.employmentScope === 'TODOS'
+          ? true
+          : item.employmentType === modalState.employmentScope,
+      )
+
+      return {
+        weekDates,
+        targetRows,
+        errorMessage: null,
+      }
+    } catch (error) {
+      return {
+        weekDates,
+        targetRows: [],
+        errorMessage:
+          error instanceof Error
+            ? `Falha ao preparar a operacao em lote: ${error.message}`
+            : 'Falha ao preparar a operacao em lote.',
+      }
+    }
+  }
+
   function getVisibleWeekRows(weekDates: Date[]) {
     if (weekDates.length !== 7 || weekDates.some((date) => Number.isNaN(date.getTime()))) {
       return []
@@ -4117,21 +4153,18 @@ function App() {
       return
     }
 
-    const weekDates = getSafeWeekDates(scaleBatchModal.weekStart)
-    if (weekDates.length !== 7) {
+    const runtimeState = resolveScaleBatchRuntimeState(scaleBatchModal)
+    if (runtimeState.errorMessage) {
       closeScaleBatchModal()
       setScaleWarning({
-        title: 'Semana invalida',
-        messages: ['A operacao em lote foi interrompida porque a semana selecionada ficou invalida. Abra novamente e tente de novo.'],
+        title: 'Operacao em lote indisponivel',
+        messages: [runtimeState.errorMessage, 'Abra novamente o modal e tente de novo.'],
       })
       return
     }
 
-    const targetRows = getVisibleWeekRows(weekDates).filter((item) =>
-      scaleBatchModal.employmentScope === 'TODOS'
-        ? true
-        : item.employmentType === scaleBatchModal.employmentScope,
-    )
+    const weekDates = runtimeState.weekDates
+    const targetRows = runtimeState.targetRows
 
     if (targetRows.length === 0) {
       setScaleWarning({
@@ -10060,11 +10093,21 @@ function App() {
                 : 'Semana visivel indisponivel. Feche o modal e abra novamente.'}
             </p>
 
+            {activeScaleBatchErrorMessage ? (
+              <div className="feedback error">
+                <strong>Operacao em lote indisponivel</strong>
+                <ul>
+                  <li>{activeScaleBatchErrorMessage}</li>
+                </ul>
+              </div>
+            ) : null}
+
             <form className="form-grid" onSubmit={submitScaleBatch}>
               <label>
                 Escopo
                 <select
                   value={scaleBatchModal.employmentScope}
+                  disabled={activeScaleBatchErrorMessage !== null}
                   onChange={(event) =>
                     setScaleBatchModal((current) =>
                       current === null
@@ -10088,6 +10131,7 @@ function App() {
                 Horario
                 <select
                   value={scaleBatchModal.scheduleIdValue}
+                  disabled={activeScaleBatchErrorMessage !== null}
                   onChange={(event) =>
                     setScaleBatchModal((current) =>
                       current === null ? current : { ...current, scheduleIdValue: event.target.value },
@@ -10114,6 +10158,7 @@ function App() {
                         <input
                           type="checkbox"
                           checked={isChecked}
+                          disabled={activeScaleBatchErrorMessage !== null}
                           onChange={() =>
                             setScaleBatchModal((current) => {
                               if (current === null) {
@@ -10140,6 +10185,7 @@ function App() {
                 <input
                   type="checkbox"
                   checked={scaleBatchModal.overwriteExisting}
+                  disabled={activeScaleBatchErrorMessage !== null}
                   onChange={(event) =>
                     setScaleBatchModal((current) =>
                       current === null
@@ -10173,7 +10219,7 @@ function App() {
                 <button type="button" className="secondary-button" onClick={closeScaleBatchModal}>
                   Cancelar
                 </button>
-                <button type="submit" className="primary-button">
+                <button type="submit" className="primary-button" disabled={activeScaleBatchErrorMessage !== null}>
                   Aplicar lote
                 </button>
               </div>
