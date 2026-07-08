@@ -193,6 +193,15 @@ Este documento traduz, para o `escala-laboral`, os pontos do `gestor-estoque` qu
   - [ ] incluir comparativo entre demanda planejada e escala realizada
   - [ ] destacar dias/linhas criticas direto no painel de relatorios
 - [ ] historico/versionamento da escala com diff e restauracao
+- [ ] adicionar linha-resumo por setor na `Cobertura diaria`, alem da linha por funcao, para leitura consolidada por area operacional
+- [ ] pesquisa regional de demanda para apoiar cobertura operacional
+  - criar um botao `Pesquisar regiao de atuacao` no painel `Cobertura operacional`
+  - usar o endereco da empresa como origem e permitir configurar um raio relevante
+  - mapear estabelecimentos comparaveis na regiao e consolidar faixas horarias de funcionamento/demanda estimada
+  - restricao: a solucao nao pode depender de recurso pago por minha parte
+  - priorizar fontes abertas, gratuitas ou dados inferidos a partir de horarios de funcionamento e densidade regional
+  - nao prometer `horario de pico real` sem fonte publica/licenciada confiavel
+  - se nao houver fonte gratuita defensavel, tratar como inteligencia regional estimada e nao como demanda comprovada
 
 ### Sprint 1
 

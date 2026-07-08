@@ -1,5 +1,5 @@
 import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { CSSProperties, FormEvent } from 'react'
 import './App.css'
 import {
   appSections,
@@ -170,6 +170,32 @@ const brazilianStates = [
 ] as const
 
 type CollaboratorEmploymentType = (typeof collaboratorEmploymentTypes)[number]
+const coverageDayKeys = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const
+type CoverageDayKey = (typeof coverageDayKeys)[number]
+type CompanyPublicServiceDay = {
+  isOpen: boolean
+  start: string
+  breakStart: string
+  breakEnd: string
+  end: string
+}
+type CompanyPublicServiceHours = Record<CoverageDayKey, CompanyPublicServiceDay>
+type CoverageFunctionTarget = {
+  functionName: string
+  minimumStaff: string
+}
+type CoverageTimeTarget = {
+  id: string
+  start: string
+  end: string
+  minimumStaff: string
+  functionTargets: CoverageFunctionTarget[]
+}
+type CoverageDayTarget = {
+  defaultMinimumStaff: string
+  timeTargets: CoverageTimeTarget[]
+}
+type CompanyCoverageTargets = Record<CoverageDayKey, CoverageDayTarget>
 type InactivePeriod = {
   from: string
   to: string | null
@@ -196,6 +222,8 @@ type CompanyRecord = {
   defaultPrintIncludeExtras?: boolean
   allowPastScaleEdits?: boolean
   linkedCompanyIds: number[]
+  publicServiceHours: CompanyPublicServiceHours
+  coverageTargets: CompanyCoverageTargets
 }
 
 type FunctionRecord = {
@@ -424,7 +452,7 @@ type AuditLogRecord = {
   relatedCompanyIds: number[]
 }
 
-type ScaleViewMode = 'week' | 'month'
+type ScaleViewMode = 'week' | 'month' | 'coverage'
 
 type ReportColumn = {
   key: string
@@ -501,6 +529,18 @@ type CompanyUserSession = {
 
 type CollaboratorModalSource = 'scale' | 'user'
 type ActiveSection = AppSection | 'PainelMaster'
+
+const appSectionLabels: Record<AppSection, string> = {
+  Painel: 'Painel',
+  Escala: 'Escala',
+  Cobertura: 'Cobertura operacional',
+  Colaboradores: 'Colaboradores',
+  Funcoes: 'Funcoes',
+  Horarios: 'Horarios',
+  Usuarios: 'Usuarios',
+  Empresa: 'Empresa',
+  Convencoes: 'Convencoes',
+}
 
 type CollectiveAgreementRecord = {
   id: number
@@ -734,6 +774,44 @@ const emptyCompanyForm = {
   city: '',
   state: '',
   collectiveAgreementId: '',
+}
+
+function formatScaleCoverageShortcutLabel(date: Date) {
+  const weekday = ['Dom.', 'Seg.', 'Ter.', 'Qua.', 'Qui.', 'Sex.', 'Sab.'][date.getDay()]
+  return `${weekday} ${String(date.getDate()).padStart(2, '0')}`
+}
+
+const coverageDayLabels: Record<CoverageDayKey, string> = {
+  monday: 'Segunda',
+  tuesday: 'Terca',
+  wednesday: 'Quarta',
+  thursday: 'Quinta',
+  friday: 'Sexta',
+  saturday: 'Sabado',
+  sunday: 'Domingo',
+}
+
+function buildEmptyPublicServiceHours(): CompanyPublicServiceHours {
+  return coverageDayKeys.reduce((accumulator, dayKey) => {
+    accumulator[dayKey] = {
+      isOpen: false,
+      start: '',
+      breakStart: '',
+      breakEnd: '',
+      end: '',
+    }
+    return accumulator
+  }, {} as CompanyPublicServiceHours)
+}
+
+function buildEmptyCoverageTargets(): CompanyCoverageTargets {
+  return coverageDayKeys.reduce((accumulator, dayKey) => {
+    accumulator[dayKey] = {
+      defaultMinimumStaff: '1',
+      timeTargets: [],
+    }
+    return accumulator
+  }, {} as CompanyCoverageTargets)
 }
 
 const emptyFunctionForm = {
@@ -971,6 +1049,235 @@ function buildUniqueLocalCloneName(baseValue: string, existingValues: string[]) 
   return `${trimmedBaseValue} (${Date.now()})`
 }
 
+function normalizePublicServiceHours(
+  publicServiceHours?: Partial<Record<CoverageDayKey, Partial<CompanyPublicServiceDay>>> | null,
+): CompanyPublicServiceHours {
+  const emptyHours = buildEmptyPublicServiceHours()
+
+  return coverageDayKeys.reduce((accumulator, dayKey) => {
+    const source = publicServiceHours?.[dayKey]
+    accumulator[dayKey] = {
+      isOpen: source?.isOpen ?? emptyHours[dayKey].isOpen,
+      start: source?.start ?? emptyHours[dayKey].start,
+      breakStart: source?.breakStart ?? emptyHours[dayKey].breakStart,
+      breakEnd: source?.breakEnd ?? emptyHours[dayKey].breakEnd,
+      end: source?.end ?? emptyHours[dayKey].end,
+    }
+    return accumulator
+  }, {} as CompanyPublicServiceHours)
+}
+
+function normalizeCoverageTargets(
+  coverageTargets?: Partial<Record<CoverageDayKey, Partial<CoverageDayTarget>>> | null,
+): CompanyCoverageTargets {
+  const emptyTargets = buildEmptyCoverageTargets()
+
+  return coverageDayKeys.reduce((accumulator, dayKey) => {
+    const source = coverageTargets?.[dayKey]
+    accumulator[dayKey] = {
+      defaultMinimumStaff:
+        typeof source?.defaultMinimumStaff === 'string' && source.defaultMinimumStaff.trim().length > 0
+          ? source.defaultMinimumStaff
+          : emptyTargets[dayKey].defaultMinimumStaff,
+      timeTargets: Array.isArray(source?.timeTargets)
+        ? source.timeTargets.map((timeTarget, index) => ({
+            id: typeof timeTarget?.id === 'string' && timeTarget.id.trim().length > 0 ? timeTarget.id : dayKey + '-target-' + String(index + 1),
+            start: typeof timeTarget?.start === 'string' ? timeTarget.start : '',
+            end: typeof timeTarget?.end === 'string' ? timeTarget.end : '',
+            minimumStaff:
+              typeof timeTarget?.minimumStaff === 'string' && timeTarget.minimumStaff.trim().length > 0
+                ? timeTarget.minimumStaff
+                : emptyTargets[dayKey].defaultMinimumStaff,
+            functionTargets: Array.isArray(timeTarget?.functionTargets)
+              ? timeTarget.functionTargets.map((functionTarget) => ({
+                  functionName: typeof functionTarget?.functionName === 'string' ? functionTarget.functionName : '',
+                  minimumStaff:
+                    typeof functionTarget?.minimumStaff === 'string' && functionTarget.minimumStaff.trim().length > 0
+                      ? functionTarget.minimumStaff
+                      : '1',
+                }))
+              : [],
+          }))
+        : [],
+    }
+    return accumulator
+  }, {} as CompanyCoverageTargets)
+}
+
+function getCoverageDayKey(date: Date): CoverageDayKey {
+  return coverageDayKeys[(date.getDay() + 6) % 7]
+}
+
+function parseTwentyFourHourValue(value: string) {
+  if (!/^\d{2}:\d{2}$/.test(value)) {
+    return null
+  }
+
+  const [hours, minutes] = value.split(':').map(Number)
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return null
+  }
+
+  return hours * 60 + minutes
+}
+
+function formatCoverageMinuteLabel(totalMinutes: number) {
+  const normalizedMinutes = ((totalMinutes % (24 * 60)) + (24 * 60)) % (24 * 60)
+  const dayOffset = Math.floor(totalMinutes / (24 * 60))
+  const hours = Math.floor(normalizedMinutes / 60)
+  const minutes = normalizedMinutes % 60
+  const baseLabel = String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0')
+
+  return dayOffset > 0 ? baseLabel + '+' + String(dayOffset) : baseLabel
+}
+
+function floorCoverageSlot(value: number) {
+  return Math.floor(value / 30) * 30
+}
+
+function ceilCoverageSlot(value: number) {
+  return Math.ceil(value / 30) * 30
+}
+
+function buildPublicServiceSegments(daySettings: CompanyPublicServiceDay) {
+  if (!daySettings.isOpen) {
+    return [] as Array<{ start: number; end: number }>
+  }
+
+  const start = parseTwentyFourHourValue(daySettings.start)
+  const end = parseTwentyFourHourValue(daySettings.end)
+  if (start === null || end === null) {
+    return [] as Array<{ start: number; end: number }>
+  }
+
+  const hasBreakStart = daySettings.breakStart.trim().length > 0
+  const hasBreakEnd = daySettings.breakEnd.trim().length > 0
+  if (hasBreakStart !== hasBreakEnd) {
+    return [] as Array<{ start: number; end: number }>
+  }
+
+  if (!hasBreakStart) {
+    const [normalizedStart, normalizedEnd] = normalizeSequentialTimes([start, end])
+    return normalizedEnd > normalizedStart ? [{ start: normalizedStart, end: normalizedEnd }] : []
+  }
+
+  const breakStart = parseTwentyFourHourValue(daySettings.breakStart)
+  const breakEnd = parseTwentyFourHourValue(daySettings.breakEnd)
+  if (breakStart === null || breakEnd === null) {
+    return [] as Array<{ start: number; end: number }>
+  }
+
+  const [normalizedStart, normalizedBreakStart, normalizedBreakEnd, normalizedEnd] =
+    normalizeSequentialTimes([start, breakStart, breakEnd, end])
+
+  if (!(normalizedStart < normalizedBreakStart && normalizedBreakStart < normalizedBreakEnd && normalizedBreakEnd < normalizedEnd)) {
+    return [] as Array<{ start: number; end: number }>
+  }
+
+  return [
+    { start: normalizedStart, end: normalizedBreakStart },
+    { start: normalizedBreakEnd, end: normalizedEnd },
+  ]
+}
+
+function buildScheduleCoverageSegments(schedule: ScheduleRecord) {
+  const start = parseTime(schedule.startTime, schedule.startPeriod)
+  const end = parseTime(schedule.endTime, schedule.endPeriod)
+  if (start === null || end === null) {
+    return [] as Array<{ start: number; end: number }>
+  }
+
+  const hasBreak = schedule.breakStart.trim().length > 0 && schedule.breakEnd.trim().length > 0
+  if (!hasBreak) {
+    const [normalizedStart, normalizedEnd] = normalizeSequentialTimes([start, end])
+    return normalizedEnd > normalizedStart ? [{ start: normalizedStart, end: normalizedEnd }] : []
+  }
+
+  const breakStart = parseTime(schedule.breakStart, schedule.breakStartPeriod)
+  const breakEnd = parseTime(schedule.breakEnd, schedule.breakEndPeriod)
+  if (breakStart === null || breakEnd === null) {
+    return [] as Array<{ start: number; end: number }>
+  }
+
+  const [normalizedStart, normalizedBreakStart, normalizedBreakEnd, normalizedEnd] =
+    normalizeSequentialTimes([start, breakStart, breakEnd, end])
+
+  if (!(normalizedStart < normalizedBreakStart && normalizedBreakStart < normalizedBreakEnd && normalizedBreakEnd < normalizedEnd)) {
+    return [] as Array<{ start: number; end: number }>
+  }
+
+  return [
+    { start: normalizedStart, end: normalizedBreakStart },
+    { start: normalizedBreakEnd, end: normalizedEnd },
+  ]
+}
+
+function buildSuggestedCoverageTimeTarget(
+  dayKey: CoverageDayKey,
+  daySettings: CompanyPublicServiceDay,
+  currentTargets: CoverageTimeTarget[],
+): CoverageTimeTarget {
+  const nextIndex = currentTargets.length + 1
+  const baseTarget: CoverageTimeTarget = {
+    id: dayKey + '-target-' + String(nextIndex),
+    start: '',
+    end: '',
+    minimumStaff: '1',
+    functionTargets: [],
+  }
+
+  if (!daySettings.isOpen || !daySettings.start || !daySettings.end) {
+    return baseTarget
+  }
+
+  if (daySettings.breakStart && daySettings.breakEnd) {
+    const hasPreBreakTarget = currentTargets.some(
+      (item) => item.start === daySettings.start && item.end === daySettings.breakStart,
+    )
+    if (!hasPreBreakTarget) {
+      return {
+        ...baseTarget,
+        start: daySettings.start,
+        end: daySettings.breakStart,
+      }
+    }
+
+    const hasPostBreakTarget = currentTargets.some(
+      (item) => item.start === daySettings.breakEnd && item.end === daySettings.end,
+    )
+    if (!hasPostBreakTarget) {
+      return {
+        ...baseTarget,
+        start: daySettings.breakEnd,
+        end: daySettings.end,
+      }
+    }
+  }
+
+  return {
+    ...baseTarget,
+    start: daySettings.start,
+    end: daySettings.end,
+  }
+}
+
+function findActiveCoverageTimeTarget(
+  dayTarget: CoverageDayTarget,
+  slotStart: number,
+  slotEnd: number,
+) {
+  return dayTarget.timeTargets.find((timeTarget) => {
+    const start = parseTwentyFourHourValue(timeTarget.start)
+    const end = parseTwentyFourHourValue(timeTarget.end)
+    if (start === null || end === null) {
+      return false
+    }
+
+    const [normalizedStart, normalizedEnd] = normalizeSequentialTimes([start, end])
+    return normalizedStart < slotEnd && normalizedEnd > slotStart
+  }) ?? null
+}
+
 function mergeSeedAgreements(storedAgreements: Array<CollectiveAgreementRecord & { isActive?: boolean }>) {
   if (storedAgreements.length === 0) {
     return initialCollectiveAgreements.map((item) => ({ ...item, isActive: item.isActive ?? true }))
@@ -999,6 +1306,8 @@ function normalizePersistedState(state: AppStateSnapshot) {
       defaultReportId: item.defaultReportId ?? 'scale-consolidated',
       defaultPrintIncludeExtras: item.defaultPrintIncludeExtras ?? false,
       allowPastScaleEdits: item.allowPastScaleEdits ?? false,
+      publicServiceHours: normalizePublicServiceHours(item.publicServiceHours),
+      coverageTargets: normalizeCoverageTargets(item.coverageTargets),
     })),
     agreements: mergeSeedAgreements(state.agreements),
     sectors: state.sectors,
@@ -1146,6 +1455,8 @@ function App() {
     ).map((item) => ({
       ...item,
       suggestedCollectiveAgreementId: item.suggestedCollectiveAgreementId ?? null,
+      publicServiceHours: normalizePublicServiceHours(item.publicServiceHours),
+      coverageTargets: normalizeCoverageTargets(item.coverageTargets),
     })),
   )
   const [agreements, setAgreements] = useState<CollectiveAgreementRecord[]>(() =>
@@ -1279,6 +1590,14 @@ function App() {
   const pendingScaleReplicationRef = useRef<(() => void) | null>(null)
   const pendingScaleBatchRef = useRef<(() => void) | null>(null)
   const pendingImpactActionRef = useRef<((replacementValue: string) => void) | null>(null)
+  const initialLocalDataPresenceRef = useRef({
+    companies: companies.length,
+    users: users.length,
+    collaborators: collaborators.length,
+    functions: functions.length,
+    schedules: schedules.length,
+    scaleAssignments: scaleAssignments.length,
+  })
   const [session, setSession] = useState<Session | null>(() =>
     readStoredValue<Session | null>(storageKeys.session, null),
   )
@@ -1289,6 +1608,8 @@ function App() {
   const [loginError, setLoginError] = useState('')
   const [companyForm, setCompanyForm] = useState(emptyCompanyForm)
   const [companyLinkedCompanyIds, setCompanyLinkedCompanyIds] = useState<number[]>([])
+  const [companyPublicServiceHours, setCompanyPublicServiceHours] = useState<CompanyPublicServiceHours>(buildEmptyPublicServiceHours())
+  const [companyCoverageTargets, setCompanyCoverageTargets] = useState<CompanyCoverageTargets>(buildEmptyCoverageTargets())
   const [functionForm, setFunctionForm] = useState(emptyFunctionForm)
   const [collaboratorForm, setCollaboratorForm] = useState(emptyCollaboratorForm)
   const [scheduleForm, setScheduleForm] = useState(emptyScheduleForm)
@@ -1324,6 +1645,8 @@ function App() {
   const [isUserFormPasswordVisible, setIsUserFormPasswordVisible] = useState(false)
   const [visibleUserPasswords, setVisibleUserPasswords] = useState<Record<number, boolean>>({})
   const [scaleViewMode, setScaleViewMode] = useState<ScaleViewMode>('week')
+  const [lastScalePlanningViewMode, setLastScalePlanningViewMode] = useState<'week' | 'month'>('week')
+  const [scaleCoverageDate, setScaleCoverageDate] = useState(toIsoDate(new Date()))
   const [scaleAnchorDate, setScaleAnchorDate] = useState(toIsoDate(new Date()))
   const [scaleMonth, setScaleMonth] = useState(toIsoDate(new Date()).slice(0, 7))
   const [scaleSectorFilter, setScaleSectorFilter] = useState('Todos')
@@ -1372,6 +1695,7 @@ function App() {
   const [zipCodeFeedback, setZipCodeFeedback] = useState('')
   const [collaboratorLookupFeedback, setCollaboratorLookupFeedback] = useState('')
   const [companyAgreementFeedback, setCompanyAgreementFeedback] = useState('')
+  const [coverageSettingsFeedback, setCoverageSettingsFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [activeMasterPanelSection, setActiveMasterPanelSection] = useState<MasterPanelSection>('Auditoria')
   const [masterPanelSearch, setMasterPanelSearch] = useState('')
   const [masterPanelSeverityFilter, setMasterPanelSeverityFilter] =
@@ -1462,6 +1786,12 @@ function App() {
     (companyId: number) => companies.find((item) => item.id === companyId)?.tradeName ?? String(companyId),
     [companies],
   )
+  const openScaleCoverageForDate = useCallback((dateValue: string) => {
+    setScaleCoverageDate(dateValue)
+    setScaleAnchorDate(dateValue)
+    setScaleMonth(dateValue.slice(0, 7))
+    setScaleViewMode('coverage')
+  }, [])
   const collaboratorProfileByCpf = useMemo(
     () =>
       collaboratorProfiles.reduce<Record<string, CollaboratorProfileRecord>>((accumulator, profile) => {
@@ -1638,6 +1968,8 @@ function App() {
     !!currentCompany &&
     effectiveSectionAccess.Escala &&
     (session?.kind === 'systemAdmin' || (session?.kind === 'companyUser' && session.user.role !== 'Visualizador'))
+  const scalePanelMode = scaleViewMode === 'coverage' ? 'coverage' : 'planning'
+
   const todayIso = toIsoDate(new Date())
   const visibleScaleSectorOptions =
     session?.kind === 'companyUser' ? session.user.sectors : availableSectorNames
@@ -2009,6 +2341,373 @@ function App() {
       <small>O vinculo autoriza compartilhamento de funcoes e horarios, mas nao mistura colaboradores nem escala.</small>
     </div>
   ) : null
+  const companyPublicServiceField = (
+    <div className="field-span company-public-service-panel">
+      <div className="field-heading">
+        <span className="field-title">Atendimento ao publico por dia da semana</span>
+        <span className="field-helper">Usado apenas na visualizacao de cobertura diaria. Nao limita os horarios dos colaboradores.</span>
+      </div>
+      <div className="company-public-service-grid">
+        {coverageDayKeys.map((dayKey) => {
+          const daySettings = companyPublicServiceHours[dayKey]
+          return (
+            <article key={dayKey} className="company-public-service-card">
+              <label className="toggle-field">
+                <span>{coverageDayLabels[dayKey]}</span>
+                <input
+                  type="checkbox"
+                  checked={daySettings.isOpen}
+                  onChange={(event) =>
+                    setCompanyPublicServiceHours((current) => ({
+                      ...current,
+                      [dayKey]: {
+                        ...current[dayKey],
+                        isOpen: event.target.checked,
+                      },
+                    }))
+                  }
+                />
+              </label>
+              <div className="company-public-service-times">
+                <label>
+                  Inicio
+                  <input
+                    type="time"
+                    value={daySettings.start}
+                    disabled={!daySettings.isOpen}
+                    onChange={(event) =>
+                      setCompanyPublicServiceHours((current) => ({
+                        ...current,
+                        [dayKey]: {
+                          ...current[dayKey],
+                          start: event.target.value,
+                        },
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Inicio pausa
+                  <input
+                    type="time"
+                    value={daySettings.breakStart}
+                    disabled={!daySettings.isOpen}
+                    onChange={(event) =>
+                      setCompanyPublicServiceHours((current) => ({
+                        ...current,
+                        [dayKey]: {
+                          ...current[dayKey],
+                          breakStart: event.target.value,
+                        },
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Fim pausa
+                  <input
+                    type="time"
+                    value={daySettings.breakEnd}
+                    disabled={!daySettings.isOpen}
+                    onChange={(event) =>
+                      setCompanyPublicServiceHours((current) => ({
+                        ...current,
+                        [dayKey]: {
+                          ...current[dayKey],
+                          breakEnd: event.target.value,
+                        },
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  Fim
+                  <input
+                    type="time"
+                    value={daySettings.end}
+                    disabled={!daySettings.isOpen}
+                    onChange={(event) =>
+                      setCompanyPublicServiceHours((current) => ({
+                        ...current,
+                        [dayKey]: {
+                          ...current[dayKey],
+                          end: event.target.value,
+                        },
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+              <div className="company-coverage-targets-panel">
+                <label>
+                  Meta padrao do dia
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={companyCoverageTargets[dayKey].defaultMinimumStaff}
+                    onChange={(event) =>
+                      setCompanyCoverageTargets((current) => ({
+                        ...current,
+                        [dayKey]: {
+                          ...current[dayKey],
+                          defaultMinimumStaff: event.target.value.replace(/\D/g, '').slice(0, 2),
+                        },
+                      }))
+                    }
+                  />
+                </label>
+                <div className="company-coverage-time-targets">
+                  {companyCoverageTargets[dayKey].timeTargets.map((timeTarget, targetIndex) => (
+                    <article key={timeTarget.id} className="company-coverage-time-target-card">
+                      <div className="company-coverage-time-target-header">
+                        <div>
+                          <strong>
+                            {timeTarget.start && timeTarget.end
+                              ? `${timeTarget.start} - ${timeTarget.end}`
+                              : 'Faixa sem horario completo'}
+                          </strong>
+                          <small>
+                            Meta total {timeTarget.minimumStaff || companyCoverageTargets[dayKey].defaultMinimumStaff || '0'}
+                            {timeTarget.functionTargets.length > 0
+                              ? ` • ${timeTarget.functionTargets.length} meta(s) por funcao`
+                              : ' • sem meta por funcao'}
+                          </small>
+                        </div>
+                      </div>
+                      <div className="company-public-service-times compact">
+                        <label>
+                          Inicio
+                          <input
+                            type="time"
+                            value={timeTarget.start}
+                            onChange={(event) =>
+                              setCompanyCoverageTargets((current) => ({
+                                ...current,
+                                [dayKey]: {
+                                  ...current[dayKey],
+                                  timeTargets: current[dayKey].timeTargets.map((item, itemIndex) =>
+                                    itemIndex === targetIndex ? { ...item, start: event.target.value } : item,
+                                  ),
+                                },
+                              }))
+                            }
+                          />
+                        </label>
+                        <label>
+                          Fim
+                          <input
+                            type="time"
+                            value={timeTarget.end}
+                            onChange={(event) =>
+                              setCompanyCoverageTargets((current) => ({
+                                ...current,
+                                [dayKey]: {
+                                  ...current[dayKey],
+                                  timeTargets: current[dayKey].timeTargets.map((item, itemIndex) =>
+                                    itemIndex === targetIndex ? { ...item, end: event.target.value } : item,
+                                  ),
+                                },
+                              }))
+                            }
+                          />
+                        </label>
+                        <label>
+                          Meta total
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            value={timeTarget.minimumStaff}
+                            onChange={(event) =>
+                              setCompanyCoverageTargets((current) => ({
+                                ...current,
+                                [dayKey]: {
+                                  ...current[dayKey],
+                                  timeTargets: current[dayKey].timeTargets.map((item, itemIndex) =>
+                                    itemIndex === targetIndex
+                                      ? { ...item, minimumStaff: event.target.value.replace(/\D/g, '').slice(0, 2) }
+                                      : item,
+                                  ),
+                                },
+                              }))
+                            }
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="danger-button"
+                          onClick={() =>
+                            setCompanyCoverageTargets((current) => ({
+                              ...current,
+                              [dayKey]: {
+                                ...current[dayKey],
+                                timeTargets: current[dayKey].timeTargets.filter((_, itemIndex) => itemIndex !== targetIndex),
+                              },
+                            }))
+                          }
+                        >
+                          Remover faixa
+                        </button>
+                      </div>
+                      <div className="company-coverage-function-targets">
+                        {timeTarget.functionTargets.map((functionTarget, functionIndex) => (
+                          <div key={timeTarget.id + '-fn-' + String(functionIndex)} className="company-coverage-function-target-row">
+                            <label>
+                              Funcao
+                              <input
+                                list="company-function-options-main"
+                                value={functionTarget.functionName}
+                                onChange={(event) =>
+                                  setCompanyCoverageTargets((current) => ({
+                                    ...current,
+                                    [dayKey]: {
+                                      ...current[dayKey],
+                                      timeTargets: current[dayKey].timeTargets.map((item, itemIndex) =>
+                                        itemIndex === targetIndex
+                                          ? {
+                                              ...item,
+                                              functionTargets: item.functionTargets.map((fnItem, fnIndex) =>
+                                                fnIndex === functionIndex
+                                                  ? { ...fnItem, functionName: event.target.value }
+                                                  : fnItem,
+                                              ),
+                                            }
+                                          : item,
+                                      ),
+                                    },
+                                  }))
+                                }
+                              />
+                            </label>
+                            <label>
+                              Meta
+                              <input
+                                type="number"
+                                min="0"
+                                step="1"
+                                value={functionTarget.minimumStaff}
+                                onChange={(event) =>
+                                  setCompanyCoverageTargets((current) => ({
+                                    ...current,
+                                    [dayKey]: {
+                                      ...current[dayKey],
+                                      timeTargets: current[dayKey].timeTargets.map((item, itemIndex) =>
+                                        itemIndex === targetIndex
+                                          ? {
+                                              ...item,
+                                              functionTargets: item.functionTargets.map((fnItem, fnIndex) =>
+                                                fnIndex === functionIndex
+                                                  ? {
+                                                      ...fnItem,
+                                                      minimumStaff: event.target.value.replace(/\D/g, '').slice(0, 2),
+                                                    }
+                                                  : fnItem,
+                                              ),
+                                            }
+                                          : item,
+                                      ),
+                                    },
+                                  }))
+                                }
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() =>
+                                setCompanyCoverageTargets((current) => ({
+                                  ...current,
+                                  [dayKey]: {
+                                    ...current[dayKey],
+                                    timeTargets: current[dayKey].timeTargets.map((item, itemIndex) =>
+                                      itemIndex === targetIndex
+                                        ? {
+                                            ...item,
+                                            functionTargets: item.functionTargets.filter((_, fnIndex) => fnIndex !== functionIndex),
+                                          }
+                                        : item,
+                                    ),
+                                  },
+                                }))
+                              }
+                            >
+                              Remover funcao
+                            </button>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() =>
+                            setCompanyCoverageTargets((current) => ({
+                              ...current,
+                              [dayKey]: {
+                                ...current[dayKey],
+                                timeTargets: current[dayKey].timeTargets.map((item, itemIndex) =>
+                                  itemIndex === targetIndex
+                                    ? {
+                                        ...item,
+                                        functionTargets: [
+                                          ...item.functionTargets,
+                                          {
+                                            functionName: '',
+                                            minimumStaff: '1',
+                                          },
+                                        ],
+                                      }
+                                    : item,
+                                ),
+                              },
+                            }))
+                          }
+                        >
+                          Adicionar meta por funcao
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() =>
+                    setCompanyCoverageTargets((current) => {
+                      const suggestedTarget = buildSuggestedCoverageTimeTarget(
+                        dayKey,
+                        companyPublicServiceHours[dayKey],
+                        current[dayKey].timeTargets,
+                      )
+                      return {
+                        ...current,
+                        [dayKey]: {
+                          ...current[dayKey],
+                          timeTargets: [
+                            ...current[dayKey].timeTargets,
+                            {
+                              ...suggestedTarget,
+                              minimumStaff: current[dayKey].defaultMinimumStaff || suggestedTarget.minimumStaff,
+                            },
+                          ],
+                        },
+                      }
+                    })
+                  }
+                >
+                  Adicionar faixa de cobertura
+                </button>
+              </div>
+            </article>
+          )
+        })}
+      </div>
+      <datalist id="company-function-options-main">
+        {availableFunctionNames.map((functionName) => (
+          <option key={functionName} value={functionName} />
+        ))}
+      </datalist>
+    </div>
+  )
   const scaleWeeks = buildScaleWeeks()
   const scaleSectorOptions = ['Todos', ...visibleScaleSectorOptions]
   const scaleFunctionOptions = ['Todos', ...visibleScaleFunctionOptions]
@@ -2049,6 +2748,148 @@ function App() {
     return visibleScaleSectorOptions.length === 0 || visibleScaleSectorOptions.includes(sectorName)
   })
   const visibleScaleExtras = visibleScaleCollaborators.filter((item) => item.employmentType === 'EXTRA')
+  const scaleCoverageDayDate = new Date(scaleCoverageDate + 'T12:00:00')
+  const scaleCoverageDayKey = getCoverageDayKey(scaleCoverageDayDate)
+  const scaleCoveragePublicServiceSettings = currentCompany
+    ? normalizePublicServiceHours(currentCompany.publicServiceHours)[scaleCoverageDayKey]
+    : buildEmptyPublicServiceHours().monday
+  const scaleCoverageDayTargets = currentCompany
+    ? normalizeCoverageTargets(currentCompany.coverageTargets)[scaleCoverageDayKey]
+    : buildEmptyCoverageTargets().monday
+  const scaleCoveragePublicServiceSegments = buildPublicServiceSegments(scaleCoveragePublicServiceSettings)
+  const scaleCoverageDefaultMinimumStaff = Math.max(
+    0,
+    Number(scaleCoverageDayTargets.defaultMinimumStaff || '0'),
+  )
+  const scaleCoverageRows = getVisibleWeekRows(getWeekDates(scaleCoverageDate))
+    .filter(
+      (item) => isCollaboratorActiveOnDate(item, scaleCoverageDate) || !!getAssignmentForDay(item.id, scaleCoverageDate),
+    )
+    .map((item) => {
+      const assignment = getAssignmentForDay(item.id, scaleCoverageDate)
+      const schedule = assignment ? getScheduleById(assignment.scheduleId) : null
+      return {
+        collaborator: item,
+        profile: getCollaboratorProfile(item.cpf),
+        sector: getCollaboratorSector(item),
+        assignment,
+        schedule,
+        segments: schedule ? buildScheduleCoverageSegments(schedule) : [],
+      }
+    })
+  const scaleCoverageAxisRange = (() => {
+    const allSegments = [
+      ...scaleCoveragePublicServiceSegments,
+      ...scaleCoverageRows.flatMap((item) => item.segments),
+    ]
+
+    if (allSegments.length === 0) {
+      return null
+    }
+
+    const minMinute = Math.min(...allSegments.map((item) => item.start))
+    const maxMinute = Math.max(...allSegments.map((item) => item.end))
+
+    return {
+      start: Math.max(0, floorCoverageSlot(minMinute) - 30),
+      end: ceilCoverageSlot(maxMinute) + 30,
+    }
+  })()
+  const scaleCoverageSlots = (() => {
+    if (!scaleCoverageAxisRange) {
+      return [] as Array<{ start: number; end: number; label: string; isInPublicService: boolean }>
+    }
+
+    const slots = [] as Array<{ start: number; end: number; label: string; isInPublicService: boolean }>
+    for (let slotStart = scaleCoverageAxisRange.start; slotStart < scaleCoverageAxisRange.end; slotStart += 30) {
+      const slotEnd = slotStart + 30
+      slots.push({
+        start: slotStart,
+        end: slotEnd,
+        label: formatCoverageMinuteLabel(slotStart),
+        isInPublicService: scaleCoveragePublicServiceSegments.some(
+          (segment) => segment.start < slotEnd && segment.end > slotStart,
+        ),
+      })
+    }
+
+    return slots
+  })()
+  const scaleCoverageSummary = scaleCoverageSlots.map((slot) => {
+    const coveredRows = scaleCoverageRows.filter((row) =>
+      row.segments.some((segment) => segment.start < slot.end && segment.end > slot.start),
+    )
+    const count = coveredRows.length
+    const activeTimeTarget = findActiveCoverageTimeTarget(scaleCoverageDayTargets, slot.start, slot.end)
+    const minimumStaff = slot.isInPublicService
+      ? Math.max(0, Number(activeTimeTarget?.minimumStaff || scaleCoverageDayTargets.defaultMinimumStaff || '0'))
+      : 0
+    const functionTargetStatuses = (activeTimeTarget?.functionTargets ?? []).map((functionTarget) => {
+      const required = Math.max(0, Number(functionTarget.minimumStaff || '0'))
+      const covered = coveredRows.filter(
+        (row) => row.collaborator.primaryFunction === functionTarget.functionName,
+      ).length
+
+      return {
+        functionName: functionTarget.functionName,
+        required,
+        covered,
+        isBelowTarget: required > covered,
+      }
+    })
+    const hasFunctionGap = functionTargetStatuses.some((item) => item.isBelowTarget)
+    const targetLabel = activeTimeTarget
+      ? formatCoverageMinuteLabel(slot.start) + ' usa faixa ' + formatCoverageMinuteLabel(parseTwentyFourHourValue(activeTimeTarget.start) ?? slot.start) + ' - ' + formatCoverageMinuteLabel(parseTwentyFourHourValue(activeTimeTarget.end) ?? slot.end)
+      : scaleCoverageDefaultMinimumStaff > 0
+        ? 'Meta padrao do dia'
+        : 'Sem meta configurada'
+
+    return {
+      ...slot,
+      count,
+      minimumStaff,
+      activeTimeTarget,
+      functionTargetStatuses,
+      hasFunctionGap,
+      targetLabel,
+      isBelowTarget: slot.isInPublicService && minimumStaff > 0 && count < minimumStaff,
+    }
+  })
+  const scaleCoverageGroupedRows = Array.from(
+    scaleCoverageRows.reduce((sectorMap, row) => {
+      const sectorName = row.sector || 'Setor nao definido'
+      const functionName = row.collaborator.primaryFunction || 'Funcao nao definida'
+      if (!sectorMap.has(sectorName)) {
+        sectorMap.set(sectorName, new Map<string, typeof scaleCoverageRows>())
+      }
+      const functionMap = sectorMap.get(sectorName)
+      if (!functionMap?.has(functionName)) {
+        functionMap?.set(functionName, [])
+      }
+      functionMap?.get(functionName)?.push(row)
+      return sectorMap
+    }, new Map<string, Map<string, typeof scaleCoverageRows>>()),
+  )
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([sectorName, functionMap]) => ({
+      sectorName,
+      functions: Array.from(functionMap.entries())
+        .sort((left, right) => left[0].localeCompare(right[0]))
+        .map(([functionName, rows]) => ({
+          functionName,
+          rows: rows.sort((left, right) =>
+            (left.profile?.fullName ?? left.collaborator.cpf).localeCompare(right.profile?.fullName ?? right.collaborator.cpf),
+          ),
+        })),
+    }))
+  const scaleCoverageHasPublicService = scaleCoveragePublicServiceSegments.length > 0
+  const scaleCoverageServiceLabel = scaleCoverageHasPublicService
+    ? scaleCoveragePublicServiceSegments
+        .map((segment) => formatCoverageMinuteLabel(segment.start) + ' - ' + formatCoverageMinuteLabel(segment.end))
+        .join(' | ') +
+      ' • meta padrao ' +
+      String(scaleCoverageDefaultMinimumStaff)
+    : 'Nao configurado para este dia da semana'
   const scaleSchedulesForSelect = companySchedules
     .sort((left, right) => left.shiftName.localeCompare(right.shiftName))
   const scheduleRules = currentAgreement
@@ -2215,14 +3056,18 @@ function App() {
       )
     }
 
-    if (isCompanyModalOpen || activeSection === 'Empresa') {
+    if (isCompanyModalOpen || activeSection === 'Empresa' || activeSection === 'Cobertura') {
       const currentCompanyLinkedIds = currentCompany?.linkedCompanyIds ?? []
       const normalizedCurrentLinkedIds = [...currentCompanyLinkedIds].sort((left, right) => left - right)
       const normalizedFormLinkedIds = [...companyLinkedCompanyIds].sort((left, right) => left - right)
+      const normalizedCurrentPublicServiceHours = normalizePublicServiceHours(currentCompany?.publicServiceHours)
+      const normalizedCurrentCoverageTargets = normalizeCoverageTargets(currentCompany?.coverageTargets)
 
       return (
         JSON.stringify(companyForm) !== JSON.stringify(buildCompanyFormSnapshot(currentCompany, emptyCompanyForm)) ||
         JSON.stringify(normalizedFormLinkedIds) !== JSON.stringify(normalizedCurrentLinkedIds) ||
+        JSON.stringify(companyPublicServiceHours) !== JSON.stringify(normalizedCurrentPublicServiceHours) ||
+        JSON.stringify(companyCoverageTargets) !== JSON.stringify(normalizedCurrentCoverageTargets) ||
         !!companyAgreementFeedback
       )
     }
@@ -2503,6 +3348,7 @@ function App() {
   }
 
   function openScaleNotification(collaboratorId: number, date: string) {
+    setLastScalePlanningViewMode('week')
     setScaleViewMode('week')
     setScaleAnchorDate(date)
     setScaleMonth(date.slice(0, 7))
@@ -4693,7 +5539,13 @@ function App() {
       collectiveAgreementId: company.collectiveAgreementId ? String(company.collectiveAgreementId) : '',
     })
     setCompanyLinkedCompanyIds(company.linkedCompanyIds ?? [])
-    setScaleViewMode(company.defaultScaleViewMode ?? 'week')
+    setCompanyPublicServiceHours(normalizePublicServiceHours(company.publicServiceHours))
+    setCompanyCoverageTargets(normalizeCoverageTargets(company.coverageTargets))
+    const nextDefaultScaleViewMode = company.defaultScaleViewMode ?? 'week'
+    setScaleViewMode(nextDefaultScaleViewMode)
+    if (nextDefaultScaleViewMode === 'week' || nextDefaultScaleViewMode === 'month') {
+      setLastScalePlanningViewMode(nextDefaultScaleViewMode)
+    }
     setPrintIncludeExtras(company.defaultPrintIncludeExtras ?? false)
     setSelectedReportId(company.defaultReportId ?? 'scale-consolidated')
   }
@@ -4822,6 +5674,8 @@ function App() {
     } else {
       setCompanyForm(emptyCompanyForm)
       setCompanyLinkedCompanyIds([])
+      setCompanyPublicServiceHours(buildEmptyPublicServiceHours())
+      setCompanyCoverageTargets(buildEmptyCoverageTargets())
     }
     setLoginError('')
   }
@@ -4863,11 +5717,149 @@ function App() {
     })
   }
 
+  function validateCoverageConfiguration() {
+    const invalidPublicServiceDay = coverageDayKeys.find((dayKey) => {
+      const daySettings = companyPublicServiceHours[dayKey]
+      if (!daySettings.isOpen) {
+        return false
+      }
+
+      if (!daySettings.start || !daySettings.end) {
+        return true
+      }
+
+      const hasBreakStart = daySettings.breakStart.trim().length > 0
+      const hasBreakEnd = daySettings.breakEnd.trim().length > 0
+      return hasBreakStart !== hasBreakEnd
+    })
+    if (invalidPublicServiceDay) {
+      return (
+        'Revise o atendimento ao publico de ' +
+        coverageDayLabels[invalidPublicServiceDay] +
+        '. Preencha inicio e fim e, se houver pausa, informe inicio e fim da pausa.'
+      )
+    }
+
+    const invalidCoverageTargetDay = coverageDayKeys.find((dayKey) => {
+      const dayTarget = companyCoverageTargets[dayKey]
+      if (dayTarget.defaultMinimumStaff.trim().length > 0 && Number.isNaN(Number(dayTarget.defaultMinimumStaff))) {
+        return true
+      }
+
+      const normalizedRanges = dayTarget.timeTargets
+        .map((timeTarget) => {
+          const start = parseTwentyFourHourValue(timeTarget.start)
+          const end = parseTwentyFourHourValue(timeTarget.end)
+          if (start === null || end === null) {
+            return null
+          }
+
+          const [normalizedStart, normalizedEnd] = normalizeSequentialTimes([start, end])
+          return { normalizedStart, normalizedEnd }
+        })
+        .filter((item): item is { normalizedStart: number; normalizedEnd: number } => item !== null)
+        .sort((left, right) => left.normalizedStart - right.normalizedStart)
+
+      for (const timeTarget of dayTarget.timeTargets) {
+        if (!timeTarget.start || !timeTarget.end) {
+          return true
+        }
+
+        if (Number.isNaN(Number(timeTarget.minimumStaff))) {
+          return true
+        }
+
+        if (
+          timeTarget.functionTargets.some(
+            (functionTarget) => !functionTarget.functionName.trim() || Number.isNaN(Number(functionTarget.minimumStaff)),
+          )
+        ) {
+          return true
+        }
+      }
+
+      for (let index = 1; index < normalizedRanges.length; index += 1) {
+        if (normalizedRanges[index - 1].normalizedEnd > normalizedRanges[index].normalizedStart) {
+          return true
+        }
+      }
+
+      return false
+    })
+
+    if (invalidCoverageTargetDay) {
+      return (
+        'Revise as metas de cobertura de ' +
+        coverageDayLabels[invalidCoverageTargetDay] +
+        '. Verifique metas numericas, horarios completos e faixas sem sobreposicao.'
+      )
+    }
+
+    return null
+  }
+
+  function submitCoverageSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setCoverageSettingsFeedback(null)
+
+    if (!currentCompanyId || !currentCompany) {
+      setCoverageSettingsFeedback({ type: 'error', message: 'Selecione uma empresa antes de configurar a cobertura operacional.' })
+      return
+    }
+
+    const coverageValidationMessage = validateCoverageConfiguration()
+    if (coverageValidationMessage) {
+      setCoverageSettingsFeedback({ type: 'error', message: coverageValidationMessage })
+      return
+    }
+
+    const sanitizedPublicServiceHours = normalizePublicServiceHours(companyPublicServiceHours)
+    const sanitizedCoverageTargets = normalizeCoverageTargets(companyCoverageTargets)
+
+    const updatedCompany: CompanyRecord = {
+      ...currentCompany,
+      publicServiceHours: sanitizedPublicServiceHours,
+      coverageTargets: sanitizedCoverageTargets,
+    }
+
+    setCompanies((current) =>
+      current.map((item) => (item.id === currentCompanyId ? updatedCompany : item)),
+    )
+    populateCompanyForm(updatedCompany)
+
+    if (currentSessionActor) {
+      appendAuditLog({
+        companyId: currentCompanyId,
+        actorName: currentSessionActor.name,
+        actorRole: currentSessionActor.role,
+        module: 'Cobertura',
+        action: 'Atualizacao',
+        targetType: 'Cobertura operacional',
+        targetLabel: currentCompany.tradeName,
+        severity: 'warning',
+        impactSummary: 'Janela de atendimento e metas de cobertura foram atualizadas.',
+        relatedCompanyIds: [currentCompanyId],
+      })
+    }
+
+    setCoverageSettingsFeedback({ type: 'success', message: 'Cobertura operacional atualizada com sucesso.' })
+  }
+
   function submitCompany(event: FormEvent<HTMLFormElement>, mode: 'create' | 'update') {
     event.preventDefault()
     setCompanyAgreementFeedback('')
 
-    if (!companyForm.tradeName.trim() || !companyForm.legalName.trim() || !companyForm.city.trim() || !companyForm.state.trim()) {
+    const missingBaseFields = [
+      !companyForm.tradeName.trim() ? 'nome fantasia' : null,
+      !companyForm.legalName.trim() ? 'razao social' : null,
+      !companyForm.city.trim() ? 'cidade' : null,
+      !companyForm.state.trim() ? 'estado' : null,
+    ].filter((item): item is string => item !== null)
+
+    if (missingBaseFields.length > 0) {
+      setCompanyAgreementFeedback(
+        'Preencha os campos obrigatorios da empresa: ' + missingBaseFields.join(', ') + '.',
+      )
       return
     }
 
@@ -4886,6 +5878,8 @@ function App() {
     const sanitizedLinkedCompanyIds = Array.from(
       new Set(companyLinkedCompanyIds.filter((companyId) => companyId !== null && companyId !== companyIdForSanitization)),
     )
+    const sanitizedPublicServiceHours = normalizePublicServiceHours(companyPublicServiceHours)
+    const sanitizedCoverageTargets = normalizeCoverageTargets(companyCoverageTargets)
 
     if (mode === 'create') {
       const newCompany: CompanyRecord = {
@@ -4899,6 +5893,8 @@ function App() {
         defaultPrintIncludeExtras: false,
         allowPastScaleEdits: false,
         linkedCompanyIds: sanitizedLinkedCompanyIds,
+        publicServiceHours: sanitizedPublicServiceHours,
+        coverageTargets: sanitizedCoverageTargets,
         tradeName: companyForm.tradeName.trim(),
         legalName: companyForm.legalName.trim(),
         cnpj: companyForm.cnpj.trim(),
@@ -4950,6 +5946,8 @@ function App() {
               defaultPrintIncludeExtras: item.defaultPrintIncludeExtras ?? false,
               allowPastScaleEdits: item.allowPastScaleEdits ?? false,
               linkedCompanyIds: sanitizedLinkedCompanyIds,
+              publicServiceHours: sanitizedPublicServiceHours,
+              coverageTargets: sanitizedCoverageTargets,
               tradeName: companyForm.tradeName.trim(),
               legalName: companyForm.legalName.trim(),
               cnpj: companyForm.cnpj.trim(),
@@ -5020,6 +6018,8 @@ function App() {
       setCurrentCompanyId(null)
       setCompanyForm(emptyCompanyForm)
       setCompanyLinkedCompanyIds([])
+      setCompanyPublicServiceHours(buildEmptyPublicServiceHours())
+      setCompanyCoverageTargets(buildEmptyCoverageTargets())
       resetForms()
     }
   }
@@ -5074,6 +6074,9 @@ function App() {
     if (targetCompany) {
       if (updates.defaultScaleViewMode) {
         setScaleViewMode(updates.defaultScaleViewMode)
+        if (updates.defaultScaleViewMode === 'week' || updates.defaultScaleViewMode === 'month') {
+          setLastScalePlanningViewMode(updates.defaultScaleViewMode)
+        }
       }
       if (updates.defaultReportId) {
         setSelectedReportId(updates.defaultReportId)
@@ -6433,87 +7436,104 @@ function App() {
         setPersistenceMode('api')
 
         if (payload.state) {
-          skipNextRemoteSyncRef.current = true
-          applyAppStateSnapshot(payload.state)
-          skipNextModuleSyncRef.current = {
-            companies: true,
-            agreements: true,
-            sectors: true,
-            functions: true,
-            collaboratorProfiles: true,
-            collaborators: true,
-            schedules: true,
-            scaleAssignments: true,
-            scaleComments: true,
-            scaleExtraRoster: true,
-            users: true,
-            auditLogs: true,
-          }
-          const [
-            remoteCompanies,
-            remoteAgreements,
-            remoteSectors,
-            remoteFunctions,
-            remoteCollaboratorProfiles,
-            remoteCollaborators,
-            remoteSchedules,
-            remoteScaleAssignments,
-            remoteScaleComments,
-            remoteScaleExtraRoster,
-            remoteUsers,
-            remoteAuditLogs,
-          ] = await Promise.all([
-            fetchModuleCollection<CompanyRecord>('companies'),
-            fetchModuleCollection<CollectiveAgreementRecord>('agreements'),
-            fetchModuleCollection<SectorRecord>('sectors'),
-            fetchModuleCollection<FunctionRecord>('functions'),
-            fetchModuleCollection<CollaboratorProfileRecord>('collaboratorProfiles'),
-            fetchModuleCollection<CollaboratorRecord>('collaborators'),
-            fetchModuleCollection<ScheduleRecord>('schedules'),
-            fetchModuleCollection<ScaleAssignmentRecord>('scaleAssignments'),
-            fetchModuleCollection<ScaleCommentThreadRecord>('scaleComments'),
-            fetchModuleCollection<ScaleExtraRosterRecord>('scaleExtraRoster'),
-            fetchModuleCollection<CompanyUserRecord>('users'),
-            fetchModuleCollection<AuditLogRecord>('auditLogs'),
-          ])
-          if (!cancelled) {
-            setCompanies(normalizeLinkedCompanyIdsInCollection(remoteCompanies))
-            setAgreements(mergeSeedAgreements(remoteAgreements))
-            setSectors(remoteSectors)
-            setFunctions(
-              remoteFunctions.map((item) => ({
-                ...item,
-                isActive: item.isActive ?? true,
-                inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive),
-              })),
-            )
-            setCollaboratorProfiles(remoteCollaboratorProfiles)
-            setCollaborators(
-              remoteCollaborators.map((item) => ({
-                ...item,
-                inactiveSince: item.inactiveSince ?? null,
-                inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive, item.inactiveSince),
-              })),
-            )
-            setSchedules(
-              remoteSchedules.map((item) => ({
-                ...item,
-                inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive),
-              })),
-            )
-            setScaleAssignments(remoteScaleAssignments)
-            setScaleComments(normalizeScaleCommentThreads(remoteScaleComments))
-            setScaleExtraRoster(remoteScaleExtraRoster)
-            setUsers(
-              remoteUsers.map((item) => ({
-                ...item,
-                sectors: item.sectors && item.sectors.length > 0 ? item.sectors : [],
-                sectionAccess: normalizeSectionAccess(item.role, item.sectionAccess),
-                linkedCollaboratorId: item.linkedCollaboratorId ?? null,
-                isActive: item.isActive ?? true,
-              })),
-            )
-            setAuditLogs(normalizeAuditLogs(remoteAuditLogs))
+          const localHasData =
+            initialLocalDataPresenceRef.current.companies > 0 ||
+            initialLocalDataPresenceRef.current.users > 0 ||
+            initialLocalDataPresenceRef.current.collaborators > 0 ||
+            initialLocalDataPresenceRef.current.functions > 0 ||
+            initialLocalDataPresenceRef.current.schedules > 0 ||
+            initialLocalDataPresenceRef.current.scaleAssignments > 0
+          const remoteHasData =
+            payload.state.companies.length > 0 ||
+            payload.state.users.length > 0 ||
+            payload.state.collaborators.length > 0 ||
+            payload.state.functions.length > 0 ||
+            payload.state.schedules.length > 0 ||
+            payload.state.scaleAssignments.length > 0
+
+          if (remoteHasData || !localHasData) {
+            skipNextRemoteSyncRef.current = true
+            applyAppStateSnapshot(payload.state)
+            skipNextModuleSyncRef.current = {
+              companies: true,
+              agreements: true,
+              sectors: true,
+              functions: true,
+              collaboratorProfiles: true,
+              collaborators: true,
+              schedules: true,
+              scaleAssignments: true,
+              scaleComments: true,
+              scaleExtraRoster: true,
+              users: true,
+              auditLogs: true,
+            }
+            const [
+              remoteCompanies,
+              remoteAgreements,
+              remoteSectors,
+              remoteFunctions,
+              remoteCollaboratorProfiles,
+              remoteCollaborators,
+              remoteSchedules,
+              remoteScaleAssignments,
+              remoteScaleComments,
+              remoteScaleExtraRoster,
+              remoteUsers,
+              remoteAuditLogs,
+            ] = await Promise.all([
+              fetchModuleCollection<CompanyRecord>('companies'),
+              fetchModuleCollection<CollectiveAgreementRecord>('agreements'),
+              fetchModuleCollection<SectorRecord>('sectors'),
+              fetchModuleCollection<FunctionRecord>('functions'),
+              fetchModuleCollection<CollaboratorProfileRecord>('collaboratorProfiles'),
+              fetchModuleCollection<CollaboratorRecord>('collaborators'),
+              fetchModuleCollection<ScheduleRecord>('schedules'),
+              fetchModuleCollection<ScaleAssignmentRecord>('scaleAssignments'),
+              fetchModuleCollection<ScaleCommentThreadRecord>('scaleComments'),
+              fetchModuleCollection<ScaleExtraRosterRecord>('scaleExtraRoster'),
+              fetchModuleCollection<CompanyUserRecord>('users'),
+              fetchModuleCollection<AuditLogRecord>('auditLogs'),
+            ])
+            if (!cancelled) {
+              setCompanies(normalizeLinkedCompanyIdsInCollection(remoteCompanies))
+              setAgreements(mergeSeedAgreements(remoteAgreements))
+              setSectors(remoteSectors)
+              setFunctions(
+                remoteFunctions.map((item) => ({
+                  ...item,
+                  isActive: item.isActive ?? true,
+                  inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive),
+                })),
+              )
+              setCollaboratorProfiles(remoteCollaboratorProfiles)
+              setCollaborators(
+                remoteCollaborators.map((item) => ({
+                  ...item,
+                  inactiveSince: item.inactiveSince ?? null,
+                  inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive, item.inactiveSince),
+                })),
+              )
+              setSchedules(
+                remoteSchedules.map((item) => ({
+                  ...item,
+                  inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive),
+                })),
+              )
+              setScaleAssignments(remoteScaleAssignments)
+              setScaleComments(normalizeScaleCommentThreads(remoteScaleComments))
+              setScaleExtraRoster(remoteScaleExtraRoster)
+              setUsers(
+                remoteUsers.map((item) => ({
+                  ...item,
+                  sectors: item.sectors && item.sectors.length > 0 ? item.sectors : [],
+                  sectionAccess: normalizeSectionAccess(item.role, item.sectionAccess),
+                  linkedCollaboratorId: item.linkedCollaboratorId ?? null,
+                  isActive: item.isActive ?? true,
+                })),
+              )
+              setAuditLogs(normalizeAuditLogs(remoteAuditLogs))
+            }
           }
         }
       } catch {
@@ -7007,14 +8027,14 @@ function App() {
 
           <form className="auth-form" onSubmit={handleLogin}>
             <label>
-              Usuario
+              Usuario <span className="required-marker">*</span>
               <input
                 value={loginForm.username}
                 onChange={(event) => setLoginForm({ ...loginForm, username: event.target.value })}
               />
             </label>
             <label>
-              Senha
+              Senha <span className="required-marker">*</span>
               <div className="password-input-row">
                 <input
                   type={isLoginPasswordVisible ? 'text' : 'password'}
@@ -7086,14 +8106,14 @@ function App() {
 
           <form className="form-grid" onSubmit={(event) => submitCompany(event, 'create')}>
             <label>
-              Nome fantasia
+              Nome fantasia <span className="required-marker">*</span>
               <input
                 value={companyForm.tradeName}
                 onChange={(event) => setCompanyForm({ ...companyForm, tradeName: event.target.value })}
               />
             </label>
             <label>
-              Razao social
+              Razao social <span className="required-marker">*</span>
               <input
                 value={companyForm.legalName}
                 onChange={(event) => setCompanyForm({ ...companyForm, legalName: event.target.value })}
@@ -7145,7 +8165,7 @@ function App() {
               />
             </label>
             <label>
-              Estado
+              Estado <span className="required-marker">*</span>
               <select
                 value={companyForm.state}
                 onChange={(event) => setCompanyForm({ ...companyForm, state: event.target.value })}
@@ -7159,7 +8179,7 @@ function App() {
               </select>
             </label>
             <label>
-              Cidade
+              Cidade <span className="required-marker">*</span>
               <input
                 value={companyForm.city}
                 onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
@@ -7172,6 +8192,7 @@ function App() {
                 Salvar primeira empresa
               </button>
             </div>
+            <p className="field-helper">Campos marcados com <span className="required-marker">*</span> sao obrigatorios.</p>
           </form>
         </section>
       </div>
@@ -7267,6 +8288,8 @@ function App() {
               onClick={() => {
                 setCompanyForm(emptyCompanyForm)
                 setCompanyLinkedCompanyIds([])
+                setCompanyPublicServiceHours(buildEmptyPublicServiceHours())
+                setCompanyCoverageTargets(buildEmptyCoverageTargets())
                 setIsCompanyModalOpen(true)
               }}
             >
@@ -7415,7 +8438,7 @@ function App() {
                 className={section === activeSection ? 'nav-item active' : 'nav-item'}
                 onClick={() => handleSectionSelection(section)}
               >
-                {section}
+                {appSectionLabels[section]}
               </button>
             ))}
             <button type="button" className="nav-item sidebar-logout" onClick={logout}>
@@ -7930,6 +8953,8 @@ function App() {
                       onClick={() => {
                         setCompanyForm(emptyCompanyForm)
                         setCompanyLinkedCompanyIds([])
+                        setCompanyPublicServiceHours(buildEmptyPublicServiceHours())
+                        setCompanyCoverageTargets(buildEmptyCoverageTargets())
                         setIsCompanyModalOpen(true)
                       }}
                     >
@@ -7965,14 +8990,14 @@ function App() {
 
             <form className="form-grid" onSubmit={(event) => submitCompany(event, 'update')}>
               <label>
-                Nome fantasia
+                Nome fantasia <span className="required-marker">*</span>
                 <input
                   value={companyForm.tradeName}
                   onChange={(event) => setCompanyForm({ ...companyForm, tradeName: event.target.value })}
                 />
               </label>
               <label>
-                Razao social
+                Razao social <span className="required-marker">*</span>
                 <input
                   value={companyForm.legalName}
                   onChange={(event) => setCompanyForm({ ...companyForm, legalName: event.target.value })}
@@ -8024,7 +9049,7 @@ function App() {
                 />
               </label>
               <label>
-                Estado
+                Estado <span className="required-marker">*</span>
                 <select
                   value={companyForm.state}
                   onChange={(event) => setCompanyForm({ ...companyForm, state: event.target.value })}
@@ -8038,7 +9063,7 @@ function App() {
                 </select>
               </label>
               <label>
-                Cidade
+                Cidade <span className="required-marker">*</span>
                 <input
                   value={companyForm.city}
                   onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
@@ -8074,6 +9099,7 @@ function App() {
                 >
                   <option value="week">Semanal</option>
                   <option value="month">Mensal</option>
+                  <option value="coverage">Cobertura diaria</option>
                 </select>
               </label>
               <label>
@@ -8117,9 +9143,50 @@ function App() {
                   }
                 />
               </label>
+              <div className="field-span helper-banner">
+                Atendimento ao publico e metas de cobertura agora ficam no painel `Cobertura operacional`.
+              </div>
               <div className="form-actions">
                 <button type="submit" className="primary-button">
                   Atualizar empresa
+                </button>
+              </div>
+              <p className="field-helper">Campos marcados com <span className="required-marker">*</span> sao obrigatorios.</p>
+            </form>
+          </section>
+        )}
+
+        {activeSection === 'Cobertura' && currentCompany && effectiveSectionAccess.Cobertura && (
+          <section className="section-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Operacao</p>
+                <h2>Cobertura operacional</h2>
+              </div>
+            </div>
+
+            <div className="helper-banner field-span">
+              Configure aqui a janela de atendimento ao publico e as metas usadas na visualizacao `Cobertura diaria` da escala.
+              Isso nao limita os horarios que podem ser cadastrados para os colaboradores.
+            </div>
+
+            <form className="form-grid" onSubmit={submitCoverageSettings}>
+              {coverageSettingsFeedback ? (
+                <div className={coverageSettingsFeedback.type === 'success' ? 'feedback success field-span' : 'feedback error field-span'}>
+                  <strong>{coverageSettingsFeedback.type === 'success' ? 'Cobertura salva' : 'Cobertura nao salva'}</strong>
+                  <span>{coverageSettingsFeedback.message}</span>
+                </div>
+              ) : null}
+              {companyPublicServiceField}
+              {coverageSettingsFeedback ? (
+                <div className={coverageSettingsFeedback.type === 'success' ? 'feedback success field-span' : 'feedback error field-span'}>
+                  <strong>{coverageSettingsFeedback.type === 'success' ? 'Cobertura salva' : 'Cobertura nao salva'}</strong>
+                  <span>{coverageSettingsFeedback.message}</span>
+                </div>
+              ) : null}
+              <div className="form-actions">
+                <button type="submit" className="primary-button">
+                  Salvar cobertura operacional
                 </button>
               </div>
             </form>
@@ -8161,7 +9228,7 @@ function App() {
 
             <form className="form-grid" onSubmit={handleAgreementSubmit}>
               <label>
-                Nome da convencao
+                Nome da convencao <span className="required-marker">*</span>
                 <input
                   value={agreementForm.name}
                   onChange={(event) => setAgreementForm({ ...agreementForm, name: event.target.value })}
@@ -8186,7 +9253,7 @@ function App() {
                 />
               </label>
               <label>
-                Estado coberto
+                Estado coberto <span className="required-marker">*</span>
                 <select
                   value={agreementForm.coveredState}
                   onChange={(event) =>
@@ -8201,7 +9268,7 @@ function App() {
                 </select>
               </label>
               <label>
-                Cidade coberta
+                Cidade coberta <span className="required-marker">*</span>
                 <input
                   value={agreementForm.coveredCity}
                   onChange={(event) =>
@@ -9119,17 +10186,57 @@ function App() {
               </div>
             ) : (
               <>
-                <div className="scale-toolbar no-print">
-                  <label>
-                    Visualizacao
-                    <select
-                      value={scaleViewMode}
-                      onChange={(event) => setScaleViewMode(event.target.value as ScaleViewMode)}
+                <div className="scale-mode-tabs no-print" role="tablist" aria-label="Modos do painel de escala">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={scalePanelMode === 'planning'}
+                    className={scalePanelMode === 'planning' ? 'scale-mode-tab active' : 'scale-mode-tab'}
+                    onClick={() => setScaleViewMode(lastScalePlanningViewMode)}
+                  >
+                    Montagem da escala
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={scalePanelMode === 'coverage'}
+                    className={scalePanelMode === 'coverage' ? 'scale-mode-tab active' : 'scale-mode-tab'}
+                    onClick={() => setScaleViewMode('coverage')}
+                  >
+                    Cobertura diaria
+                  </button>
+                </div>
+
+                {scalePanelMode === 'planning' ? (
+                  <div className="scale-submode-tabs no-print" role="tablist" aria-label="Visualizacao da montagem da escala">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={(scaleViewMode === 'coverage' ? lastScalePlanningViewMode : scaleViewMode) === 'week'}
+                      className={(scaleViewMode === 'coverage' ? lastScalePlanningViewMode : scaleViewMode) === 'week' ? 'scale-submode-tab active' : 'scale-submode-tab'}
+                      onClick={() => {
+                        setLastScalePlanningViewMode('week')
+                        setScaleViewMode('week')
+                      }}
                     >
-                      <option value="week">Semana</option>
-                      <option value="month">Mes</option>
-                    </select>
-                  </label>
+                      Semana
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={(scaleViewMode === 'coverage' ? lastScalePlanningViewMode : scaleViewMode) === 'month'}
+                      className={(scaleViewMode === 'coverage' ? lastScalePlanningViewMode : scaleViewMode) === 'month' ? 'scale-submode-tab active' : 'scale-submode-tab'}
+                      onClick={() => {
+                        setLastScalePlanningViewMode('month')
+                        setScaleViewMode('month')
+                      }}
+                    >
+                      Mes
+                    </button>
+                  </div>
+                ) : null}
+
+                <div className="scale-toolbar no-print">
                   {scaleViewMode === 'week' ? (
                     <label>
                       Semana de referencia
@@ -9138,10 +10245,30 @@ function App() {
                         value={scaleAnchorDate}
                         onChange={(event) => {
                           setScaleAnchorDate(event.target.value)
+                          setScaleCoverageDate(event.target.value)
                           setScaleMonth(event.target.value.slice(0, 7))
                         }}
                       />
                     </label>
+                  ) : scaleViewMode === 'coverage' ? (
+                    <>
+                      <label>
+                        Dia de referencia
+                        <input
+                          type="date"
+                          value={scaleCoverageDate}
+                          onChange={(event) => {
+                            setScaleCoverageDate(event.target.value)
+                            setScaleAnchorDate(event.target.value)
+                            setScaleMonth(event.target.value.slice(0, 7))
+                          }}
+                        />
+                      </label>
+                      <label>
+                        Atendimento ao publico
+                        <input value={scaleCoverageServiceLabel} readOnly />
+                      </label>
+                    </>
                   ) : (
                     <>
                       <label>
@@ -9232,11 +10359,196 @@ function App() {
                   </div>
                 </div>
 
-                {scaleViewMode === 'month' ? (
-                  <div className="helper-banner field-span no-print">
-                    Exibindo {getMonthLabel(scaleMonth)} em blocos semanais sucessivos.
-                  </div>
-                ) : null}
+                {scaleViewMode === 'coverage' ? (
+                  <section className="coverage-day-card">
+                    <div className="section-header compact-header">
+                      <div>
+                        <p className="eyebrow">Cobertura diaria</p>
+                        <h3>{formatDateLabel(scaleCoverageDate)}</h3>
+                      </div>
+                      <p className="section-note">
+                        Atendimento ao publico: {scaleCoverageServiceLabel}
+                      </p>
+                    </div>
+
+                    {!scaleCoverageHasPublicService ? (
+                      <div className="feedback warning">
+                        <strong>Atendimento ao publico nao configurado para este dia.</strong>
+                        <ul>
+                          <li>Configure a janela de atendimento no painel da empresa para comparar cobertura com a operacao aberta ao cliente.</li>
+                        </ul>
+                      </div>
+                    ) : null}
+
+                    {scaleCoverageSlots.length === 0 ? (
+                      <div className="feedback error">
+                        <strong>Sem dados para montar a cobertura diaria.</strong>
+                        <ul>
+                          <li>Nao ha atendimento ao publico nem horarios lancados que permitam desenhar a linha do tempo deste dia.</li>
+                        </ul>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="coverage-legend no-print">
+                          <span className="coverage-legend-item service">Atendimento ao publico</span>
+                          <span className="coverage-legend-item low">Abaixo da meta</span>
+                          <span className="coverage-legend-item on-target">Meta atendida</span>
+                          <span className="coverage-legend-item function-gap">Total ok, funcao abaixo</span>
+                          <span className="coverage-legend-item gap">Sem cobertura</span>
+                          <span className="coverage-legend-item outside">Pre-abertura / fechamento</span>
+                        </div>
+
+                        <div className="coverage-grid-wrap">
+                          <div
+                            className="coverage-grid"
+                            style={{ '--coverage-slot-count': String(scaleCoverageSlots.length) } as CSSProperties}
+                          >
+                            <div className="coverage-sticky coverage-sticky-header">Colaborador</div>
+                            {scaleCoverageSlots.map((slot) => (
+                              <div
+                                key={`header-${slot.start}`}
+                                className={slot.isInPublicService ? 'coverage-slot-header service' : 'coverage-slot-header'}
+                              >
+                                {slot.label}
+                              </div>
+                            ))}
+
+                            <div className="coverage-sticky coverage-summary-label">Cobertura</div>
+                            {scaleCoverageSummary.map((slot) => (
+                              <div
+                                key={`summary-${slot.start}`}
+                                className={[
+                                  'coverage-summary-cell',
+                                  slot.isInPublicService ? 'service' : 'outside',
+                                  slot.isInPublicService && slot.count === 0 ? 'gap' : '',
+                                  slot.isBelowTarget && slot.count > 0 ? 'below-target' : '',
+                                  slot.hasFunctionGap && !slot.isBelowTarget ? 'function-gap' : '',
+                                  slot.isInPublicService && slot.minimumStaff > 0 && slot.count >= slot.minimumStaff && !slot.hasFunctionGap ? 'on-target' : '',
+                                ]
+                                  .filter(Boolean)
+                                  .join(' ')}
+                                title={
+                                  slot.isInPublicService
+                                    ? [
+                                        `Cobertura ${slot.count} de minimo ${slot.minimumStaff}`,
+                                        slot.targetLabel,
+                                        ...slot.functionTargetStatuses.map(
+                                          (functionTarget) =>
+                                            `${functionTarget.functionName}: ${functionTarget.covered}/${functionTarget.required}`,
+                                        ),
+                                      ].join(' • ')
+                                    : `Cobertura ${slot.count}`
+                                }
+                              >
+                                <strong>
+                                  {slot.isInPublicService
+                                    ? `${slot.count}/${slot.minimumStaff}${slot.hasFunctionGap ? ' *' : ''}`
+                                    : String(slot.count)}
+                                </strong>
+                              </div>
+                            ))}
+
+                            {scaleCoverageGroupedRows.map((sectorGroup) => (
+                              <Fragment key={`coverage-sector-${sectorGroup.sectorName}`}>
+                                <div className="coverage-sticky coverage-group-card coverage-sector-card">
+                                  <strong>Setor: {sectorGroup.sectorName}</strong>
+                                </div>
+                                {scaleCoverageSlots.map((slot) => (
+                                  <div
+                                    key={`coverage-sector-${sectorGroup.sectorName}-${slot.start}`}
+                                    className={slot.isInPublicService ? 'coverage-group-cell service' : 'coverage-group-cell outside'}
+                                  />
+                                ))}
+
+                                {sectorGroup.functions.map((functionGroup) => (
+                                  <Fragment key={`coverage-function-${sectorGroup.sectorName}-${functionGroup.functionName}`}>
+                                    <div className="coverage-sticky coverage-group-card coverage-function-card">
+                                      <strong>Funcao: {functionGroup.functionName}</strong>
+                                      <small>{functionGroup.rows.length} colaborador(es)</small>
+                                    </div>
+                                    {scaleCoverageSummary.map((slot) => {
+                                      const coveredCount = functionGroup.rows.filter((row) =>
+                                        row.segments.some((segment) => segment.start < slot.end && segment.end > slot.start),
+                                      ).length
+                                      const functionTarget = slot.functionTargetStatuses.find(
+                                        (item) => item.functionName === functionGroup.functionName,
+                                      )
+                                      const isBelowFunctionTarget = !!functionTarget && functionTarget.covered < functionTarget.required
+                                      return (
+                                        <div
+                                          key={`coverage-function-${sectorGroup.sectorName}-${functionGroup.functionName}-${slot.start}`}
+                                          className={[
+                                            'coverage-summary-cell',
+                                            slot.isInPublicService ? 'service' : 'outside',
+                                            slot.isInPublicService && coveredCount === 0 ? 'gap' : '',
+                                            isBelowFunctionTarget && coveredCount > 0 ? 'below-target' : '',
+                                            functionTarget && !isBelowFunctionTarget ? 'on-target' : '',
+                                          ]
+                                            .filter(Boolean)
+                                            .join(' ')}
+                                          title={
+                                            functionTarget
+                                              ? `${functionGroup.functionName}: ${functionTarget.covered}/${functionTarget.required}`
+                                              : `${functionGroup.functionName}: ${coveredCount} colaborador(es)`
+                                          }
+                                        >
+                                          <strong>{functionTarget ? `${functionTarget.covered}/${functionTarget.required}` : String(coveredCount)}</strong>
+                                        </div>
+                                      )
+                                    })}
+
+                                    {functionGroup.rows.map((row) => {
+                                      const rowValidation = validateScaleRow(row.collaborator, getWeekDates(scaleCoverageDate))
+                                      return (
+                                        <Fragment key={`coverage-${row.collaborator.id}`}>
+                                          <div className="coverage-sticky coverage-person-card">
+                                            <strong>{getShortDisplayName(row.profile?.fullName ?? row.collaborator.cpf)}</strong>
+                                            <span>{row.collaborator.primaryFunction} • {row.collaborator.employmentType}</span>
+                                            <small>{row.sector || 'Setor nao definido'}</small>
+                                            {rowValidation.issues.length > 0 ? <small>{rowValidation.issues[0]}</small> : null}
+                                          </div>
+                                          {scaleCoverageSlots.map((slot) => {
+                                            const covered = row.segments.some(
+                                              (segment) => segment.start < slot.end && segment.end > slot.start,
+                                            )
+                                            return (
+                                              <div
+                                                key={`${row.collaborator.id}-${slot.start}`}
+                                                className={[
+                                                  'coverage-slot-cell',
+                                                  slot.isInPublicService ? 'service' : 'outside',
+                                                  covered ? 'covered' : '',
+                                                  slot.isInPublicService && !covered ? 'gap' : '',
+                                                ]
+                                                  .filter(Boolean)
+                                                  .join(' ')}
+                                                title={
+                                                  covered
+                                                    ? `${row.schedule?.shiftName ?? 'Horario'} • ${slot.label}`
+                                                    : `${slot.label} sem cobertura`
+                                                }
+                                              />
+                                            )
+                                          })}
+                                        </Fragment>
+                                      )
+                                    })}
+                                  </Fragment>
+                                ))}
+                              </Fragment>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </section>
+                ) : (
+                  <>
+                    {scaleViewMode === 'month' ? (
+                      <div className="helper-banner field-span no-print">
+                        Exibindo {getMonthLabel(scaleMonth)} em blocos semanais sucessivos.
+                      </div>
+                    ) : null}
 
                 <div className="print-only print-summary no-print">
                   <strong>{currentCompany.tradeName}</strong>
@@ -9303,6 +10615,22 @@ function App() {
                               </button>
                             ) : null}
                           </div>
+                        </div>
+                        <div className="scale-week-coverage-shortcuts no-print">
+                          <span className="scale-week-coverage-shortcuts-title">Cobertura</span>
+                          {weekDates.map((date) => {
+                            const isoDate = toIsoDate(date)
+                            return (
+                              <button
+                                key={`coverage-shortcut-${isoDate}`}
+                                type="button"
+                                className="ghost-button scale-week-coverage-shortcut-button"
+                                onClick={() => openScaleCoverageForDate(isoDate)}
+                              >
+                                {formatScaleCoverageShortcutLabel(date)}
+                              </button>
+                            )
+                          })}
                         </div>
 
                         <div className="scale-grid-wrap">
@@ -9858,6 +11186,8 @@ function App() {
                     )
                   })}
                 </div>
+                  </>
+                )}
               </>
             )}
           </section>
@@ -9883,21 +11213,21 @@ function App() {
 
             <form className="form-grid" onSubmit={handleUserSubmit}>
               <label>
-                Nome completo
+                Nome completo <span className="required-marker">*</span>
                 <input
                   value={userForm.fullName}
                   onChange={(event) => setUserForm({ ...userForm, fullName: event.target.value })}
                 />
               </label>
               <label>
-                Usuario
+                Usuario <span className="required-marker">*</span>
                 <input
                   value={userForm.username}
                   onChange={(event) => setUserForm({ ...userForm, username: event.target.value })}
                 />
               </label>
               <label>
-                Senha
+                Senha <span className="required-marker">*</span>
                 <div className="password-input-row">
                   <input
                     type={isUserFormPasswordVisible ? 'text' : 'password'}
@@ -10028,7 +11358,7 @@ function App() {
               {userForm.role === 'Visualizador' ? (
                 <div className="field-span">
                   <label>
-                    Colaborador vinculado
+                    Colaborador vinculado <span className="required-marker">*</span>
                     <select
                       value={userForm.linkedCollaboratorId}
                       onChange={(event) =>
@@ -11829,14 +13159,14 @@ function App() {
 
             <form className="form-grid" onSubmit={(event) => submitCompany(event, 'create')}>
               <label>
-                Nome fantasia
+                Nome fantasia <span className="required-marker">*</span>
                 <input
                   value={companyForm.tradeName}
                   onChange={(event) => setCompanyForm({ ...companyForm, tradeName: event.target.value })}
                 />
               </label>
               <label>
-                Razao social
+                Razao social <span className="required-marker">*</span>
                 <input
                   value={companyForm.legalName}
                   onChange={(event) => setCompanyForm({ ...companyForm, legalName: event.target.value })}
@@ -11888,7 +13218,7 @@ function App() {
                 />
               </label>
               <label>
-                Estado
+                Estado <span className="required-marker">*</span>
                 <select
                   value={companyForm.state}
                   onChange={(event) => setCompanyForm({ ...companyForm, state: event.target.value })}
@@ -11902,7 +13232,7 @@ function App() {
                 </select>
               </label>
               <label>
-                Cidade
+                Cidade <span className="required-marker">*</span>
                 <input
                   value={companyForm.city}
                   onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
@@ -11915,6 +13245,7 @@ function App() {
                   Salvar empresa
                 </button>
               </div>
+              <p className="field-helper">Campos marcados com <span className="required-marker">*</span> sao obrigatorios.</p>
             </form>
           </section>
         </div>

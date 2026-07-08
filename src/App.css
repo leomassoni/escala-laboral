@@ -710,6 +710,52 @@
   color: var(--muted);
 }
 
+.scale-mode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.scale-mode-tab {
+  border: 1px solid rgba(87, 55, 30, 0.14);
+  background: rgba(255, 255, 255, 0.74);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 10px 16px;
+  font: inherit;
+  font-weight: 600;
+}
+
+.scale-mode-tab.active {
+  background: #5e4018;
+  color: #fff8ef;
+  border-color: #5e4018;
+}
+
+.scale-submode-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.scale-submode-tab {
+  border: 1px solid rgba(87, 55, 30, 0.12);
+  background: rgba(255, 248, 239, 0.88);
+  color: #5e4018;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font: inherit;
+  font-weight: 600;
+}
+
+.scale-submode-tab.active {
+  background: #c9802f;
+  color: #fff9f2;
+  border-color: #c9802f;
+}
+
 .scale-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -2728,4 +2774,284 @@ select:focus,
 
 .impact-warning-replacement {
   margin-top: 18px;
+}
+
+.company-public-service-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.company-public-service-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.company-public-service-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(87, 55, 30, 0.12);
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.company-public-service-times {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.company-public-service-times.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.company-coverage-time-target-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.company-coverage-time-target-header small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.company-coverage-targets-panel {
+  display: grid;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(87, 55, 30, 0.08);
+}
+
+.company-coverage-time-targets {
+  display: grid;
+  gap: 10px;
+}
+
+.company-coverage-time-target-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(87, 55, 30, 0.1);
+  background: rgba(255, 248, 240, 0.72);
+}
+
+.company-coverage-function-targets {
+  display: grid;
+  gap: 8px;
+}
+
+.company-coverage-function-target-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(120px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.scale-week-coverage-shortcuts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.scale-week-coverage-shortcuts-title {
+  flex: 0 0 auto;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.scale-week-coverage-shortcut-button {
+  flex: 0 0 auto;
+  min-width: 78px;
+  justify-content: center;
+}
+
+.coverage-day-card {
+  display: grid;
+  gap: 16px;
+}
+
+.coverage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.coverage-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(87, 55, 30, 0.12);
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.coverage-legend-item.service {
+  background: rgba(255, 240, 199, 0.82);
+}
+
+.coverage-legend-item.low {
+  background: rgba(255, 235, 194, 0.86);
+}
+
+.coverage-legend-item.on-target {
+  background: rgba(220, 245, 226, 0.88);
+}
+
+.coverage-legend-item.function-gap {
+  background: rgba(255, 230, 186, 0.9);
+}
+
+.coverage-legend-item.gap {
+  background: rgba(255, 218, 209, 0.88);
+}
+
+.coverage-legend-item.outside {
+  background: rgba(240, 235, 228, 0.9);
+}
+
+.coverage-grid-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow: auto;
+  border-radius: 18px;
+  border: 1px solid rgba(87, 55, 30, 0.1);
+  background: rgba(255, 252, 247, 0.84);
+}
+
+.coverage-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 280px) repeat(var(--coverage-slot-count), minmax(44px, 1fr));
+  min-width: max-content;
+}
+
+.coverage-sticky,
+.coverage-slot-header,
+.coverage-summary-cell,
+.coverage-slot-cell {
+  min-height: 44px;
+  border-right: 1px solid rgba(87, 55, 30, 0.08);
+  border-bottom: 1px solid rgba(87, 55, 30, 0.08);
+}
+
+.coverage-sticky {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 10px 12px;
+  background: #fff8ef;
+  box-shadow: 10px 0 18px rgba(70, 44, 23, 0.06);
+}
+
+.coverage-sticky-header,
+.coverage-summary-label {
+  font-weight: 700;
+  background: #f7ebdd;
+}
+
+.coverage-person-card span,
+.coverage-person-card small {
+  color: var(--muted);
+}
+
+.coverage-group-card {
+  font-weight: 700;
+  background: #f8efe3;
+}
+
+.coverage-sector-card {
+  background: #efe0cb;
+}
+
+.coverage-function-card {
+  background: #f7ebdd;
+}
+
+.coverage-group-card small {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.coverage-group-cell {
+  min-height: 44px;
+  border-right: 1px solid rgba(87, 55, 30, 0.08);
+  border-bottom: 1px solid rgba(87, 55, 30, 0.08);
+}
+
+.coverage-group-cell.outside {
+  background: rgba(232, 224, 216, 0.58);
+}
+
+.coverage-group-cell.service {
+  background: rgba(245, 230, 198, 0.72);
+}
+
+.coverage-slot-header,
+.coverage-summary-cell,
+.coverage-slot-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+}
+
+.coverage-slot-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f6f1eb;
+  color: var(--muted);
+}
+
+.coverage-slot-header.service {
+  background: #f9e6b5;
+  color: #5e4018;
+}
+
+.coverage-summary-cell.outside,
+.coverage-slot-cell.outside {
+  background: rgba(232, 224, 216, 0.7);
+}
+
+.coverage-summary-cell.service,
+.coverage-slot-cell.service {
+  background: rgba(255, 244, 210, 0.88);
+}
+
+.coverage-summary-cell.low,
+.coverage-summary-cell.below-target {
+  background: rgba(255, 216, 135, 0.96);
+  color: #5b3a0a;
+}
+
+.coverage-summary-cell.on-target {
+  background: rgba(188, 240, 201, 0.96);
+  color: #124b26;
+}
+
+.coverage-summary-cell.function-gap {
+  background: rgba(255, 229, 175, 0.95);
+  color: #6a4209;
+}
+
+.coverage-summary-cell.gap,
+.coverage-slot-cell.gap {
+  background: rgba(255, 210, 202, 0.94);
+}
+
+.coverage-slot-cell.covered {
+  background: linear-gradient(180deg, #bcf0c9 0%, #7fd29a 100%);
 }

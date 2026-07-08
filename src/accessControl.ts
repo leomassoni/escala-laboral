@@ -3,6 +3,7 @@ export const companyRoles = ['Administrativo', 'Gestor', 'Visualizador'] as cons
 export const appSections = [
   'Painel',
   'Escala',
+  'Cobertura',
   'Colaboradores',
   'Funcoes',
   'Horarios',
@@ -23,6 +24,7 @@ export function buildDefaultSectionAccessByRole(role: CompanyRole): UserSectionA
     return {
       Painel: false,
       Escala: true,
+      Cobertura: false,
       Colaboradores: false,
       Funcoes: false,
       Horarios: false,
@@ -36,6 +38,7 @@ export function buildDefaultSectionAccessByRole(role: CompanyRole): UserSectionA
     return {
       Painel: true,
       Escala: true,
+      Cobertura: true,
       Colaboradores: true,
       Funcoes: true,
       Horarios: true,
@@ -48,6 +51,7 @@ export function buildDefaultSectionAccessByRole(role: CompanyRole): UserSectionA
   return {
     Painel: true,
     Escala: true,
+    Cobertura: true,
     Colaboradores: true,
     Funcoes: true,
     Horarios: true,
