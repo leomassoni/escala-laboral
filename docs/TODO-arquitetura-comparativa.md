@@ -193,6 +193,7 @@ Este documento traduz, para o `escala-laboral`, os pontos do `gestor-estoque` qu
   - [ ] incluir comparativo entre demanda planejada e escala realizada
   - [ ] destacar dias/linhas criticas direto no painel de relatorios
 - [ ] historico/versionamento da escala com diff e restauracao
+- [ ] revisar e ampliar a normalizacao automatica de textos cadastrais para maiusculas e sem acentos em outros campos operacionais, sem afetar senha, login, URL, busca, documentos e campos tecnicos
 - [ ] adicionar linha-resumo por setor na `Cobertura diaria`, alem da linha por funcao, para leitura consolidada por area operacional
 - [ ] pesquisa regional de demanda para apoiar cobertura operacional
   - criar um botao `Pesquisar regiao de atuacao` no painel `Cobertura operacional`

@@ -804,6 +804,13 @@ function buildEmptyPublicServiceHours(): CompanyPublicServiceHours {
   }, {} as CompanyPublicServiceHours)
 }
 
+function normalizeTextEntry(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+}
+
 function buildEmptyCoverageTargets(): CompanyCoverageTargets {
   return coverageDayKeys.reduce((accumulator, dayKey) => {
     accumulator[dayKey] = {
@@ -3056,18 +3063,24 @@ function App() {
       )
     }
 
-    if (isCompanyModalOpen || activeSection === 'Empresa' || activeSection === 'Cobertura') {
-      const currentCompanyLinkedIds = currentCompany?.linkedCompanyIds ?? []
-      const normalizedCurrentLinkedIds = [...currentCompanyLinkedIds].sort((left, right) => left - right)
-      const normalizedFormLinkedIds = [...companyLinkedCompanyIds].sort((left, right) => left - right)
+    if (activeSection === 'Cobertura') {
       const normalizedCurrentPublicServiceHours = normalizePublicServiceHours(currentCompany?.publicServiceHours)
       const normalizedCurrentCoverageTargets = normalizeCoverageTargets(currentCompany?.coverageTargets)
 
       return (
+        JSON.stringify(companyPublicServiceHours) !== JSON.stringify(normalizedCurrentPublicServiceHours) ||
+        JSON.stringify(companyCoverageTargets) !== JSON.stringify(normalizedCurrentCoverageTargets)
+      )
+    }
+
+    if (isCompanyModalOpen || activeSection === 'Empresa') {
+      const currentCompanyLinkedIds = currentCompany?.linkedCompanyIds ?? []
+      const normalizedCurrentLinkedIds = [...currentCompanyLinkedIds].sort((left, right) => left - right)
+      const normalizedFormLinkedIds = [...companyLinkedCompanyIds].sort((left, right) => left - right)
+
+      return (
         JSON.stringify(companyForm) !== JSON.stringify(buildCompanyFormSnapshot(currentCompany, emptyCompanyForm)) ||
         JSON.stringify(normalizedFormLinkedIds) !== JSON.stringify(normalizedCurrentLinkedIds) ||
-        JSON.stringify(companyPublicServiceHours) !== JSON.stringify(normalizedCurrentPublicServiceHours) ||
-        JSON.stringify(companyCoverageTargets) !== JSON.stringify(normalizedCurrentCoverageTargets) ||
         !!companyAgreementFeedback
       )
     }
@@ -8109,14 +8122,14 @@ function App() {
               Nome fantasia <span className="required-marker">*</span>
               <input
                 value={companyForm.tradeName}
-                onChange={(event) => setCompanyForm({ ...companyForm, tradeName: event.target.value })}
+                onChange={(event) => setCompanyForm({ ...companyForm, tradeName: normalizeTextEntry(event.target.value) })}
               />
             </label>
             <label>
               Razao social <span className="required-marker">*</span>
               <input
                 value={companyForm.legalName}
-                onChange={(event) => setCompanyForm({ ...companyForm, legalName: event.target.value })}
+                onChange={(event) => setCompanyForm({ ...companyForm, legalName: normalizeTextEntry(event.target.value) })}
               />
             </label>
             <label>
@@ -8140,7 +8153,7 @@ function App() {
               Logradouro
               <input
                 value={companyForm.street}
-                onChange={(event) => setCompanyForm({ ...companyForm, street: event.target.value })}
+                onChange={(event) => setCompanyForm({ ...companyForm, street: normalizeTextEntry(event.target.value) })}
               />
             </label>
             <label>
@@ -8154,14 +8167,14 @@ function App() {
               Complemento
               <input
                 value={companyForm.complement}
-                onChange={(event) => setCompanyForm({ ...companyForm, complement: event.target.value })}
+                onChange={(event) => setCompanyForm({ ...companyForm, complement: normalizeTextEntry(event.target.value) })}
               />
             </label>
             <label>
               Bairro
               <input
                 value={companyForm.district}
-                onChange={(event) => setCompanyForm({ ...companyForm, district: event.target.value })}
+                onChange={(event) => setCompanyForm({ ...companyForm, district: normalizeTextEntry(event.target.value) })}
               />
             </label>
             <label>
@@ -8182,7 +8195,7 @@ function App() {
               Cidade <span className="required-marker">*</span>
               <input
                 value={companyForm.city}
-                onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
+                onChange={(event) => setCompanyForm({ ...companyForm, city: normalizeTextEntry(event.target.value) })}
               />
             </label>
                 {companyLinksField}
@@ -8322,14 +8335,14 @@ function App() {
                   Nome fantasia
                   <input
                     value={companyForm.tradeName}
-                    onChange={(event) => setCompanyForm({ ...companyForm, tradeName: event.target.value })}
+                    onChange={(event) => setCompanyForm({ ...companyForm, tradeName: normalizeTextEntry(event.target.value) })}
                   />
                 </label>
                 <label>
                   Razao social
                   <input
                     value={companyForm.legalName}
-                    onChange={(event) => setCompanyForm({ ...companyForm, legalName: event.target.value })}
+                    onChange={(event) => setCompanyForm({ ...companyForm, legalName: normalizeTextEntry(event.target.value) })}
                   />
                 </label>
                 <label>
@@ -8353,7 +8366,7 @@ function App() {
                   Logradouro
                   <input
                     value={companyForm.street}
-                    onChange={(event) => setCompanyForm({ ...companyForm, street: event.target.value })}
+                    onChange={(event) => setCompanyForm({ ...companyForm, street: normalizeTextEntry(event.target.value) })}
                   />
                 </label>
                 <label>
@@ -8367,14 +8380,14 @@ function App() {
                   Complemento
                   <input
                     value={companyForm.complement}
-                    onChange={(event) => setCompanyForm({ ...companyForm, complement: event.target.value })}
+                    onChange={(event) => setCompanyForm({ ...companyForm, complement: normalizeTextEntry(event.target.value) })}
                   />
                 </label>
                 <label>
                   Bairro
                   <input
                     value={companyForm.district}
-                    onChange={(event) => setCompanyForm({ ...companyForm, district: event.target.value })}
+                    onChange={(event) => setCompanyForm({ ...companyForm, district: normalizeTextEntry(event.target.value) })}
                   />
                 </label>
                 <label>
@@ -8395,7 +8408,7 @@ function App() {
                   Cidade
                   <input
                     value={companyForm.city}
-                    onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
+                    onChange={(event) => setCompanyForm({ ...companyForm, city: normalizeTextEntry(event.target.value) })}
                   />
                 </label>
                 {companyLinksField}
@@ -8993,14 +9006,14 @@ function App() {
                 Nome fantasia <span className="required-marker">*</span>
                 <input
                   value={companyForm.tradeName}
-                  onChange={(event) => setCompanyForm({ ...companyForm, tradeName: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, tradeName: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
                 Razao social <span className="required-marker">*</span>
                 <input
                   value={companyForm.legalName}
-                  onChange={(event) => setCompanyForm({ ...companyForm, legalName: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, legalName: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -9024,7 +9037,7 @@ function App() {
                 Logradouro
                 <input
                   value={companyForm.street}
-                  onChange={(event) => setCompanyForm({ ...companyForm, street: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, street: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -9038,14 +9051,14 @@ function App() {
                 Complemento
                 <input
                   value={companyForm.complement}
-                  onChange={(event) => setCompanyForm({ ...companyForm, complement: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, complement: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
                 Bairro
                 <input
                   value={companyForm.district}
-                  onChange={(event) => setCompanyForm({ ...companyForm, district: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, district: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -9066,7 +9079,7 @@ function App() {
                 Cidade <span className="required-marker">*</span>
                 <input
                   value={companyForm.city}
-                  onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, city: normalizeTextEntry(event.target.value) })}
                 />
               </label>
                 {companyLinksField}
@@ -9231,7 +9244,7 @@ function App() {
                 Nome da convencao <span className="required-marker">*</span>
                 <input
                   value={agreementForm.name}
-                  onChange={(event) => setAgreementForm({ ...agreementForm, name: event.target.value })}
+                  onChange={(event) => setAgreementForm({ ...agreementForm, name: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -9239,7 +9252,7 @@ function App() {
                 <input
                   value={agreementForm.employerUnion}
                   onChange={(event) =>
-                    setAgreementForm({ ...agreementForm, employerUnion: event.target.value })
+                    setAgreementForm({ ...agreementForm, employerUnion: normalizeTextEntry(event.target.value) })
                   }
                 />
               </label>
@@ -9248,7 +9261,7 @@ function App() {
                 <input
                   value={agreementForm.employeeUnion}
                   onChange={(event) =>
-                    setAgreementForm({ ...agreementForm, employeeUnion: event.target.value })
+                    setAgreementForm({ ...agreementForm, employeeUnion: normalizeTextEntry(event.target.value) })
                   }
                 />
               </label>
@@ -9272,7 +9285,7 @@ function App() {
                 <input
                   value={agreementForm.coveredCity}
                   onChange={(event) =>
-                    setAgreementForm({ ...agreementForm, coveredCity: event.target.value })
+                    setAgreementForm({ ...agreementForm, coveredCity: normalizeTextEntry(event.target.value) })
                   }
                 />
               </label>
@@ -9280,7 +9293,7 @@ function App() {
                 Categoria
                 <input
                   value={agreementForm.category}
-                  onChange={(event) => setAgreementForm({ ...agreementForm, category: event.target.value })}
+                  onChange={(event) => setAgreementForm({ ...agreementForm, category: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -9303,7 +9316,7 @@ function App() {
                 Fonte
                 <input
                   value={agreementForm.sourceLabel}
-                  onChange={(event) => setAgreementForm({ ...agreementForm, sourceLabel: event.target.value })}
+                  onChange={(event) => setAgreementForm({ ...agreementForm, sourceLabel: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -9424,7 +9437,7 @@ function App() {
                 <textarea
                   rows={5}
                   value={agreementForm.notes}
-                  onChange={(event) => setAgreementForm({ ...agreementForm, notes: event.target.value })}
+                  onChange={(event) => setAgreementForm({ ...agreementForm, notes: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <div className="form-actions agreement-form-actions">
@@ -9506,7 +9519,7 @@ function App() {
                   required
                   value={collaboratorForm.fullName}
                   onChange={(event) =>
-                    setCollaboratorForm({ ...collaboratorForm, fullName: event.target.value })
+                    setCollaboratorForm({ ...collaboratorForm, fullName: normalizeTextEntry(event.target.value) })
                   }
                 />
               </label>
@@ -9695,7 +9708,7 @@ function App() {
                 <input
                   required
                   value={functionForm.name}
-                  onChange={(event) => setFunctionForm({ ...functionForm, name: event.target.value })}
+                  onChange={(event) => setFunctionForm({ ...functionForm, name: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -9705,7 +9718,7 @@ function App() {
                   list="company-sector-options-main"
                   placeholder="Selecione ou digite um novo setor"
                   value={functionForm.sector}
-                  onChange={(event) => setFunctionForm({ ...functionForm, sector: event.target.value })}
+                  onChange={(event) => setFunctionForm({ ...functionForm, sector: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -9743,7 +9756,7 @@ function App() {
                   rows={5}
                   value={functionForm.description}
                   onChange={(event) =>
-                    setFunctionForm({ ...functionForm, description: event.target.value })
+                    setFunctionForm({ ...functionForm, description: normalizeTextEntry(event.target.value) })
                   }
                 />
               </label>
@@ -11216,7 +11229,7 @@ function App() {
                 Nome completo <span className="required-marker">*</span>
                 <input
                   value={userForm.fullName}
-                  onChange={(event) => setUserForm({ ...userForm, fullName: event.target.value })}
+                  onChange={(event) => setUserForm({ ...userForm, fullName: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -12921,7 +12934,7 @@ function App() {
                   required
                   value={collaboratorForm.fullName}
                   onChange={(event) =>
-                    setCollaboratorForm({ ...collaboratorForm, fullName: event.target.value })
+                    setCollaboratorForm({ ...collaboratorForm, fullName: normalizeTextEntry(event.target.value) })
                   }
                 />
               </label>
@@ -13069,7 +13082,7 @@ function App() {
                 <input
                   required
                   value={functionForm.name}
-                  onChange={(event) => setFunctionForm({ ...functionForm, name: event.target.value })}
+                  onChange={(event) => setFunctionForm({ ...functionForm, name: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -13079,7 +13092,7 @@ function App() {
                   list="company-sector-options-modal"
                   placeholder="Selecione ou digite um novo setor"
                   value={functionForm.sector}
-                  onChange={(event) => setFunctionForm({ ...functionForm, sector: event.target.value })}
+                  onChange={(event) => setFunctionForm({ ...functionForm, sector: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -13117,7 +13130,7 @@ function App() {
                   rows={5}
                   value={functionForm.description}
                   onChange={(event) =>
-                    setFunctionForm({ ...functionForm, description: event.target.value })
+                    setFunctionForm({ ...functionForm, description: normalizeTextEntry(event.target.value) })
                   }
                 />
               </label>
@@ -13162,14 +13175,14 @@ function App() {
                 Nome fantasia <span className="required-marker">*</span>
                 <input
                   value={companyForm.tradeName}
-                  onChange={(event) => setCompanyForm({ ...companyForm, tradeName: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, tradeName: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
                 Razao social <span className="required-marker">*</span>
                 <input
                   value={companyForm.legalName}
-                  onChange={(event) => setCompanyForm({ ...companyForm, legalName: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, legalName: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -13193,7 +13206,7 @@ function App() {
                 Logradouro
                 <input
                   value={companyForm.street}
-                  onChange={(event) => setCompanyForm({ ...companyForm, street: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, street: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -13207,14 +13220,14 @@ function App() {
                 Complemento
                 <input
                   value={companyForm.complement}
-                  onChange={(event) => setCompanyForm({ ...companyForm, complement: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, complement: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
                 Bairro
                 <input
                   value={companyForm.district}
-                  onChange={(event) => setCompanyForm({ ...companyForm, district: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, district: normalizeTextEntry(event.target.value) })}
                 />
               </label>
               <label>
@@ -13235,7 +13248,7 @@ function App() {
                 Cidade <span className="required-marker">*</span>
                 <input
                   value={companyForm.city}
-                  onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })}
+                  onChange={(event) => setCompanyForm({ ...companyForm, city: normalizeTextEntry(event.target.value) })}
                 />
               </label>
                 {companyLinksField}
