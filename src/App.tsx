@@ -1869,7 +1869,16 @@ function App() {
         getValue: (item: FunctionRecord) =>
           item.extraPayValue ? formatCurrency(parseCurrencyValue(item.extraPayValue)) : 'Nao informado',
       },
-      { key: 'descricao', label: 'Descritivo', getValue: (item: FunctionRecord) => item.description },
+      {
+        key: 'descricao',
+        label: 'Descritivo',
+        getValue: (item: FunctionRecord) => item.description,
+        renderCell: (item: FunctionRecord) => (
+          <span className="table-truncate-cell" title={item.description}>
+            {item.description}
+          </span>
+        ),
+      },
       {
         key: 'status',
         label: 'Status',
