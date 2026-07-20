@@ -1619,6 +1619,7 @@ function App() {
   const [companyCoverageTargets, setCompanyCoverageTargets] = useState<CompanyCoverageTargets>(buildEmptyCoverageTargets())
   const [functionForm, setFunctionForm] = useState(emptyFunctionForm)
   const [collaboratorForm, setCollaboratorForm] = useState(emptyCollaboratorForm)
+  const [editingCollaboratorId, setEditingCollaboratorId] = useState<number | null>(null)
   const [scheduleForm, setScheduleForm] = useState(emptyScheduleForm)
   const [userForm, setUserForm] = useState(emptyUserForm)
   const [agreementForm, setAgreementForm] = useState(emptyAgreementForm)
@@ -1775,10 +1776,13 @@ function App() {
     currentCompanyId === null
       ? companies.filter((item) => item.status === 'ATIVA')
       : companies.filter((item) => item.id !== currentCompanyId && item.status === 'ATIVA')
+  const collaboratorFormCpfDigits = collaboratorForm.cpf.replace(/\D/g, '')
   const currentCollaboratorProfile =
-    collaboratorProfiles.find(
-      (item) => item.cpf.replace(/\D/g, '') === collaboratorForm.cpf.replace(/\D/g, ''),
-    ) ?? null
+    collaboratorFormCpfDigits.length === 0
+      ? null
+      : collaboratorProfiles.find(
+          (item) => item.cpf.replace(/\D/g, '') === collaboratorFormCpfDigits,
+        ) ?? null
   const availableFunctionNames = Array.from(
     new Set([
       ...companyFunctions.filter((item) => item.isActive).map((item) => item.name),
@@ -1939,11 +1943,15 @@ function App() {
   const currentCompanyCollaborator =
     currentCompanyId === null
       ? null
-      : collaborators.find(
-          (item) =>
-            item.companyId === currentCompanyId &&
-            item.cpf.replace(/\D/g, '') === collaboratorForm.cpf.replace(/\D/g, ''),
-        ) ?? null
+      : editingCollaboratorId !== null
+        ? collaborators.find((item) => item.companyId === currentCompanyId && item.id === editingCollaboratorId) ?? null
+        : collaboratorFormCpfDigits.length === 0
+          ? null
+          : collaborators.find(
+              (item) =>
+                item.companyId === currentCompanyId &&
+                item.cpf.replace(/\D/g, '') === collaboratorFormCpfDigits,
+            ) ?? null
   const isSystemAdmin = session?.kind === 'systemAdmin'
   const isViewer = session?.kind === 'companyUser' && session.user.role === 'Visualizador'
   const currentSessionKey =
@@ -3014,6 +3022,7 @@ function App() {
     })
     setFunctionForm(resetState.functionForm)
     setCollaboratorForm(resetState.collaboratorForm)
+    setEditingCollaboratorId(null)
     setScheduleForm(resetState.scheduleForm)
     setUserForm(resetState.userForm)
     setAgreementForm(resetState.agreementForm)
@@ -3257,6 +3266,10 @@ function App() {
   }
 
   function getCollaboratorProfile(cpf: string) {
+    if (!cpf.trim()) {
+      return null
+    }
+
     return collaboratorProfiles.find((item) => item.cpf === cpf) ?? null
   }
 
@@ -6427,7 +6440,7 @@ function App() {
         : collaboratorForm.functions.slice(0, 1)
 
     const cpfDigits = collaboratorForm.cpf.replace(/\D/g, '')
-    if (cpfDigits.length !== 11) {
+    if (cpfDigits.length > 0 && cpfDigits.length !== 11) {
       validationMessages.push('Informe um CPF completo com 11 digitos.')
     }
 
@@ -6469,31 +6482,33 @@ function App() {
       primaryFunction,
     }
 
-    setCollaboratorProfiles((current) => {
-      const nextKnownFunctions = Array.from(
-        new Set([
-          ...(currentCollaboratorProfile?.knownFunctions ?? []),
-          ...normalizedFunctions,
-        ]),
-      )
+    if (cpfDigits.length === 11) {
+      setCollaboratorProfiles((current) => {
+        const nextKnownFunctions = Array.from(
+          new Set([
+            ...(currentCollaboratorProfile?.knownFunctions ?? []),
+            ...normalizedFunctions,
+          ]),
+        )
 
-      const nextProfile: CollaboratorProfileRecord = {
-        cpf: collaboratorForm.cpf.trim(),
-        fullName: collaboratorForm.fullName.trim(),
-        pixKey: collaboratorForm.pixKey.trim(),
-        contact: collaboratorForm.contact.trim(),
-        knownFunctions: nextKnownFunctions,
-      }
+        const nextProfile: CollaboratorProfileRecord = {
+          cpf: collaboratorForm.cpf.trim(),
+          fullName: collaboratorForm.fullName.trim(),
+          pixKey: collaboratorForm.pixKey.trim(),
+          contact: collaboratorForm.contact.trim(),
+          knownFunctions: nextKnownFunctions,
+        }
 
-      const exists = current.some((item) => item.cpf.replace(/\D/g, '') === cpfDigits)
-      if (!exists) {
-        return [nextProfile, ...current]
-      }
+        const exists = current.some((item) => item.cpf.replace(/\D/g, '') === cpfDigits)
+        if (!exists) {
+          return [nextProfile, ...current]
+        }
 
-      return current.map((item) =>
-        item.cpf.replace(/\D/g, '') === cpfDigits ? nextProfile : item,
-      )
-    })
+        return current.map((item) =>
+          item.cpf.replace(/\D/g, '') === cpfDigits ? nextProfile : item,
+        )
+      })
+    }
     setCollaborators((current) =>
       currentCompanyCollaborator
         ? current.map((item) =>
@@ -6508,6 +6523,7 @@ function App() {
       }))
     }
     setCollaboratorForm(emptyCollaboratorForm)
+    setEditingCollaboratorId(null)
     setCollaboratorLookupFeedback(
       currentCompanyCollaborator
         ? 'Cadastro deste colaborador foi atualizado nesta empresa.'
@@ -7156,6 +7172,7 @@ function App() {
       collaboratorProfiles.find((profile) => profile.cpf.replace(/\D/g, '') === targetCollaborator.cpf.replace(/\D/g, '')) ?? null
 
     const nextState = buildCollaboratorEditState(targetCollaborator, targetProfile)
+    setEditingCollaboratorId(collaboratorId)
     setCollaboratorForm(nextState.collaboratorForm)
     setCollaboratorLookupFeedback(nextState.collaboratorLookupFeedback)
   }
@@ -7181,9 +7198,10 @@ function App() {
         ),
       )
 
-      if (currentCompanyCollaborator?.id === collaboratorId) {
+      if (editingCollaboratorId === collaboratorId) {
         setCollaboratorForm(emptyCollaboratorForm)
         setCollaboratorLookupFeedback('')
+        setEditingCollaboratorId(null)
       }
     })
   }
@@ -7317,6 +7335,7 @@ function App() {
 
   function openCollaboratorModal(source: CollaboratorModalSource) {
     const nextState = buildCollaboratorModalOpenState(source, emptyCollaboratorForm, userForm.fullName)
+    setEditingCollaboratorId(null)
     setCollaboratorModalSource(nextState.collaboratorModalSource)
     setCollaboratorLookupFeedback(nextState.collaboratorLookupFeedback)
     setCollaboratorForm(nextState.collaboratorForm)
@@ -7354,6 +7373,7 @@ function App() {
     }
 
     const nextState = buildCollaboratorModalClosedState(emptyCollaboratorForm)
+    setEditingCollaboratorId(null)
     setCollaboratorForm(nextState.collaboratorForm)
     setCollaboratorLookupFeedback(nextState.collaboratorLookupFeedback)
     setIsCollaboratorModalOpen(nextState.isCollaboratorModalOpen)
@@ -9514,9 +9534,8 @@ function App() {
 
             <form className="form-grid" onSubmit={handleCollaboratorSubmit}>
               <label>
-                CPF <span className="required-marker">*</span>
+                CPF
                 <input
-                  required
                   placeholder="000.000.000-00"
                   value={collaboratorForm.cpf}
                   onChange={(event) => changeCollaboratorCpf(event.target.value)}
@@ -12929,9 +12948,8 @@ function App() {
 
             <form className="form-grid" onSubmit={handleCollaboratorSubmit}>
               <label>
-                CPF <span className="required-marker">*</span>
+                CPF
                 <input
-                  required
                   value={collaboratorForm.cpf}
                   onChange={(event) => changeCollaboratorCpf(event.target.value)}
                   placeholder="000.000.000-00"
