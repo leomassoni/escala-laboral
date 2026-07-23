@@ -22,6 +22,9 @@ type FunctionLike = {
 
 type CollaboratorLike = {
   cpf: string
+  fullName: string
+  pixKey: string
+  contact: string
   employmentType: 'CLT' | 'PJ' | 'EXTRA'
   functions: string[]
   primaryFunction: string
@@ -99,9 +102,9 @@ export function buildCollaboratorEditState(
   return {
     collaboratorForm: {
       cpf: targetCollaborator.cpf,
-      fullName: targetProfile?.fullName ?? '',
-      pixKey: targetProfile?.pixKey ?? '',
-      contact: targetProfile?.contact ?? '',
+      fullName: targetProfile?.fullName ?? targetCollaborator.fullName ?? '',
+      pixKey: targetProfile?.pixKey ?? targetCollaborator.pixKey ?? '',
+      contact: targetProfile?.contact ?? targetCollaborator.contact ?? '',
       employmentType: targetCollaborator.employmentType,
       functions: targetCollaborator.functions,
       primaryFunction: targetCollaborator.primaryFunction,

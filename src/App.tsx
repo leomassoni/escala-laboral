@@ -249,6 +249,9 @@ type CollaboratorRecord = {
   id: number
   companyId: number
   cpf: string
+  fullName: string
+  pixKey: string
+  contact: string
   employmentType: CollaboratorEmploymentType
   isActive: boolean
   inactiveSince: string | null
@@ -1326,6 +1329,9 @@ function normalizePersistedState(state: AppStateSnapshot) {
     collaboratorProfiles: state.collaboratorProfiles,
     collaborators: state.collaborators.map((item) => ({
       ...item,
+      fullName: typeof item.fullName === 'string' ? item.fullName : '',
+      pixKey: typeof item.pixKey === 'string' ? item.pixKey : '',
+      contact: typeof item.contact === 'string' ? item.contact : '',
       inactiveSince: item.inactiveSince ?? null,
       inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive, item.inactiveSince),
     })),
@@ -1537,6 +1543,9 @@ function App() {
     readStoredValue<Array<CollaboratorRecord & { inactiveSince?: string | null; inactivePeriods?: InactivePeriod[] }>>(storageKeys.collaborators, []).map(
       (item) => ({
         ...item,
+        fullName: typeof item.fullName === 'string' ? item.fullName : '',
+        pixKey: typeof item.pixKey === 'string' ? item.pixKey : '',
+        contact: typeof item.contact === 'string' ? item.contact : '',
         inactiveSince: item.inactiveSince ?? null,
         inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive, item.inactiveSince),
       }),
@@ -1817,9 +1826,9 @@ function App() {
         key: 'nome',
         label: 'Nome',
         getValue: (item: CollaboratorRecord) =>
-          collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.fullName ?? item.cpf,
+          collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.fullName ?? item.fullName ?? item.cpf,
         renderCell: (item: CollaboratorRecord) => (
-          <strong>{collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.fullName ?? item.cpf}</strong>
+          <strong>{collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.fullName ?? item.fullName ?? item.cpf}</strong>
         ),
       },
       { key: 'cpf', label: 'CPF', getValue: (item: CollaboratorRecord) => item.cpf },
@@ -1830,13 +1839,13 @@ function App() {
         key: 'contato',
         label: 'Contato',
         getValue: (item: CollaboratorRecord) =>
-          collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.contact ?? 'Contato pendente',
+          collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.contact ?? item.contact ?? 'Contato pendente',
       },
       {
         key: 'pix',
         label: 'PIX',
         getValue: (item: CollaboratorRecord) =>
-          collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.pixKey ?? 'PIX pendente',
+          collaboratorProfileByCpf[item.cpf.replace(/\D/g, '')]?.pixKey ?? item.pixKey ?? 'PIX pendente',
       },
       {
         key: 'status',
@@ -3273,6 +3282,10 @@ function App() {
     return collaboratorProfiles.find((item) => item.cpf === cpf) ?? null
   }
 
+  function getCollaboratorDisplayName(collaborator: CollaboratorRecord) {
+    return getCollaboratorProfile(collaborator.cpf)?.fullName ?? collaborator.fullName ?? collaborator.cpf
+  }
+
   function getFunctionByName(functionName: string) {
     return companyFunctions.find((item) => item.name === functionName) ?? null
   }
@@ -4018,7 +4031,7 @@ function App() {
   }
 
   function getReportCollaboratorName(collaborator: CollaboratorRecord) {
-    return getCollaboratorProfile(collaborator.cpf)?.fullName ?? collaborator.cpf
+    return getCollaboratorDisplayName(collaborator)
   }
 
   function matchesReportSector(collaborator: CollaboratorRecord) {
@@ -6474,6 +6487,9 @@ function App() {
       id: nextCollaboratorId,
       companyId: currentCompanyId,
       cpf: collaboratorForm.cpf.trim(),
+      fullName: collaboratorForm.fullName.trim(),
+      pixKey: collaboratorForm.pixKey.trim(),
+      contact: collaboratorForm.contact.trim(),
       employmentType: collaboratorForm.employmentType,
       isActive: currentCompanyCollaborator?.isActive ?? true,
       inactiveSince: currentCompanyCollaborator?.inactiveSince ?? null,
@@ -7552,6 +7568,9 @@ function App() {
               setCollaborators(
                 remoteCollaborators.map((item) => ({
                   ...item,
+                  fullName: typeof item.fullName === 'string' ? item.fullName : '',
+                  pixKey: typeof item.pixKey === 'string' ? item.pixKey : '',
+                  contact: typeof item.contact === 'string' ? item.contact : '',
                   inactiveSince: item.inactiveSince ?? null,
                   inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive, item.inactiveSince),
                 })),
@@ -9681,7 +9700,7 @@ function App() {
                     type="button"
                     className="icon-button icon-edit"
                     onClick={() => editCollaborator(item.id)}
-                    aria-label={`Editar colaborador ${getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf}`}
+                    aria-label={`Editar colaborador ${getCollaboratorDisplayName(item)}`}
                     title="Editar"
                   >
                     ✎
@@ -9693,8 +9712,8 @@ function App() {
                       onClick={() => toggleCollaboratorActivation(item.id)}
                       aria-label={
                         item.isActive
-                          ? `Inativar colaborador ${getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf}`
-                          : `Ativar colaborador ${getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf}`
+                          ? `Inativar colaborador ${getCollaboratorDisplayName(item)}`
+                          : `Ativar colaborador ${getCollaboratorDisplayName(item)}`
                       }
                       title={item.isActive ? 'Inativar' : 'Ativar'}
                     >
@@ -9706,7 +9725,7 @@ function App() {
                       type="button"
                       className="icon-button icon-delete"
                       onClick={() => deleteCollaborator(item.id)}
-                      aria-label={`Excluir colaborador ${getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf}`}
+                      aria-label={`Excluir colaborador ${getCollaboratorDisplayName(item)}`}
                       title="Excluir"
                     >
                       🗑
@@ -11416,7 +11435,7 @@ function App() {
                         })
                         .map((item) => (
                           <option key={item.id} value={item.id}>
-                            {(getCollaboratorProfile(item.cpf)?.fullName ?? item.cpf)} • {getCollaboratorSector(item)}
+                            {getCollaboratorDisplayName(item)} • {getCollaboratorSector(item)}
                           </option>
                         ))}
                     </select>
