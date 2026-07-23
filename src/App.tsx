@@ -53,7 +53,6 @@ import {
 } from './sectorUtils'
 import {
   apiBaseUrl,
-  appStateVersion,
   readStoredValue,
   storageKeys,
   writeStoredValue,
@@ -1593,7 +1592,6 @@ function App() {
   )
   const [persistenceMode, setPersistenceMode] = useState<'pending' | 'local' | 'api'>('pending')
   const [isPersistenceReady, setIsPersistenceReady] = useState(false)
-  const skipNextRemoteSyncRef = useRef(false)
   const skipNextModuleSyncRef = useRef<Record<ModularStateKey, boolean>>({
     companies: false,
     agreements: false,
@@ -1608,7 +1606,6 @@ function App() {
     users: false,
     auditLogs: false,
   })
-  const remoteSyncTimeoutRef = useRef<number | null>(null)
   const pendingDiscardActionRef = useRef<(() => void) | null>(null)
   const pendingScaleReplicationRef = useRef<(() => void) | null>(null)
   const pendingScaleBatchRef = useRef<(() => void) | null>(null)
@@ -1721,6 +1718,7 @@ function App() {
   const [collaboratorLookupFeedback, setCollaboratorLookupFeedback] = useState('')
   const [companyAgreementFeedback, setCompanyAgreementFeedback] = useState('')
   const [coverageSettingsFeedback, setCoverageSettingsFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
+  const [persistenceFeedback, setPersistenceFeedback] = useState<{ type: 'warning' | 'error'; message: string } | null>(null)
   const [activeMasterPanelSection, setActiveMasterPanelSection] = useState<MasterPanelSection>('Auditoria')
   const [masterPanelSearch, setMasterPanelSearch] = useState('')
   const [masterPanelSeverityFilter, setMasterPanelSeverityFilter] =
@@ -7500,57 +7498,30 @@ function App() {
     )
   }
 
-  async function fetchModuleCollection<T>(moduleKey: ModularStateKey) {
-    const response = await fetch(`${apiBaseUrl}/${moduleKey}`)
-    if (!response.ok) {
-      throw new Error(`module-${moduleKey}-unavailable`)
-    }
-
-    const payload = (await response.json()) as { items: T[] }
-    return payload.items
-  }
-
   async function persistModuleCollection<T>(moduleKey: ModularStateKey, items: T[]) {
-    await fetch(`${apiBaseUrl}/${moduleKey}`, {
+    const response = await fetch(`${apiBaseUrl}/${moduleKey}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ items }),
     })
+
+    if (!response.ok) {
+      throw new Error(`module-${moduleKey}-persist-failed-${response.status}`)
+    }
   }
 
-  const appStateSnapshot = useMemo<AppStateSnapshot>(
-    () => ({
-      version: appStateVersion,
-      companies,
-      agreements,
-      sectors,
-      functions,
-      collaboratorProfiles,
-      collaborators,
-      schedules,
-      scaleAssignments,
-      scaleComments,
-      scaleExtraRoster,
-      users,
-      auditLogs,
-    }),
-    [
-      agreements,
-      auditLogs,
-      collaboratorProfiles,
-      collaborators,
-      companies,
-      functions,
-      scaleAssignments,
-      scaleComments,
-      scaleExtraRoster,
-      schedules,
-      sectors,
-      users,
-    ],
-  )
+  function handlePersistenceFailure(moduleLabel: string) {
+    setPersistenceFeedback({
+      type: 'error',
+      message: `Falha ao salvar ${moduleLabel} no banco de dados online. As alteracoes continuam somente neste navegador ate a sincronizacao voltar a funcionar.`,
+    })
+  }
+
+  function clearPersistenceFeedback() {
+    setPersistenceFeedback(null)
+  }
 
   function applyAppStateSnapshot(snapshot: AppStateSnapshot) {
     const normalizedState = normalizePersistedState(snapshot)
@@ -7602,7 +7573,6 @@ function App() {
             payload.state.scaleAssignments.length > 0
 
           if (remoteHasData || !localHasData) {
-            skipNextRemoteSyncRef.current = true
             applyAppStateSnapshot(payload.state)
             skipNextModuleSyncRef.current = {
               companies: true,
@@ -7618,76 +7588,10 @@ function App() {
               users: true,
               auditLogs: true,
             }
-            const [
-              remoteCompanies,
-              remoteAgreements,
-              remoteSectors,
-              remoteFunctions,
-              remoteCollaboratorProfiles,
-              remoteCollaborators,
-              remoteSchedules,
-              remoteScaleAssignments,
-              remoteScaleComments,
-              remoteScaleExtraRoster,
-              remoteUsers,
-              remoteAuditLogs,
-            ] = await Promise.all([
-              fetchModuleCollection<CompanyRecord>('companies'),
-              fetchModuleCollection<CollectiveAgreementRecord>('agreements'),
-              fetchModuleCollection<SectorRecord>('sectors'),
-              fetchModuleCollection<FunctionRecord>('functions'),
-              fetchModuleCollection<CollaboratorProfileRecord>('collaboratorProfiles'),
-              fetchModuleCollection<CollaboratorRecord>('collaborators'),
-              fetchModuleCollection<ScheduleRecord>('schedules'),
-              fetchModuleCollection<ScaleAssignmentRecord>('scaleAssignments'),
-              fetchModuleCollection<ScaleCommentThreadRecord>('scaleComments'),
-              fetchModuleCollection<ScaleExtraRosterRecord>('scaleExtraRoster'),
-              fetchModuleCollection<CompanyUserRecord>('users'),
-              fetchModuleCollection<AuditLogRecord>('auditLogs'),
-            ])
-            if (!cancelled) {
-              setCompanies(normalizeLinkedCompanyIdsInCollection(remoteCompanies))
-              setAgreements(mergeSeedAgreements(remoteAgreements))
-              setSectors(remoteSectors)
-              setFunctions(
-                remoteFunctions.map((item) => ({
-                  ...item,
-                  isActive: item.isActive ?? true,
-                  inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive),
-                })),
-              )
-              setCollaboratorProfiles(remoteCollaboratorProfiles)
-              setCollaborators(
-                remoteCollaborators.map((item) => ({
-                  ...item,
-                  fullName: typeof item.fullName === 'string' ? item.fullName : '',
-                  pixKey: typeof item.pixKey === 'string' ? item.pixKey : '',
-                  contact: typeof item.contact === 'string' ? item.contact : '',
-                  inactiveSince: item.inactiveSince ?? null,
-                  inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive, item.inactiveSince),
-                })),
-              )
-              setSchedules(
-                remoteSchedules.map((item) => ({
-                  ...item,
-                  inactivePeriods: normalizeInactivePeriods(item.inactivePeriods, item.isActive),
-                })),
-              )
-              setScaleAssignments(remoteScaleAssignments)
-              setScaleComments(normalizeScaleCommentThreads(remoteScaleComments))
-              setScaleExtraRoster(remoteScaleExtraRoster)
-              setUsers(
-                remoteUsers.map((item) => ({
-                  ...item,
-                  sectors: item.sectors && item.sectors.length > 0 ? item.sectors : [],
-                  sectionAccess: normalizeSectionAccess(item.role, item.sectionAccess),
-                  linkedCollaboratorId: item.linkedCollaboratorId ?? null,
-                  isActive: item.isActive ?? true,
-                })),
-              )
-              setAuditLogs(normalizeAuditLogs(remoteAuditLogs))
-            }
           }
+        }
+        if (!cancelled) {
+          clearPersistenceFeedback()
         }
       } catch {
         if (!cancelled) {
@@ -7706,54 +7610,6 @@ function App() {
       cancelled = true
     }
   }, [])
-
-  useEffect(() => {
-    if (!isPersistenceReady || persistenceMode !== 'api') {
-      return
-    }
-
-    if (skipNextRemoteSyncRef.current) {
-      skipNextRemoteSyncRef.current = false
-      return
-    }
-
-    if (remoteSyncTimeoutRef.current !== null) {
-      window.clearTimeout(remoteSyncTimeoutRef.current)
-    }
-
-    remoteSyncTimeoutRef.current = window.setTimeout(() => {
-      void fetch(`${apiBaseUrl}/state`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(appStateSnapshot),
-      }).catch(() => {
-        setPersistenceMode('local')
-      })
-    }, 600)
-
-    return () => {
-      if (remoteSyncTimeoutRef.current !== null) {
-        window.clearTimeout(remoteSyncTimeoutRef.current)
-      }
-    }
-  }, [
-    agreements,
-    collaboratorProfiles,
-    collaborators,
-    companies,
-    functions,
-    isPersistenceReady,
-    persistenceMode,
-    scaleAssignments,
-    scaleComments,
-    scaleExtraRoster,
-    schedules,
-    sectors,
-    users,
-    appStateSnapshot,
-  ])
 
   useEffect(() => {
     const zipDigits = companyForm.zipCode.replace(/\D/g, '')
@@ -7821,9 +7677,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('companies', companies).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('companies', companies)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('empresas')
+      })
   }, [companies, isPersistenceReady, persistenceMode])
 
   useEffect(() => {
@@ -7840,9 +7698,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('agreements', agreements).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('agreements', agreements)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('convencoes coletivas')
+      })
   }, [agreements, isPersistenceReady, persistenceMode])
 
   useEffect(() => {
@@ -7859,9 +7719,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('sectors', sectors).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('sectors', sectors)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('setores')
+      })
   }, [isPersistenceReady, persistenceMode, sectors])
 
   useEffect(() => {
@@ -7878,9 +7740,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('functions', functions).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('functions', functions)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('funcoes')
+      })
   }, [functions, isPersistenceReady, persistenceMode])
 
   useEffect(() => {
@@ -7897,9 +7761,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('collaboratorProfiles', collaboratorProfiles).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('collaboratorProfiles', collaboratorProfiles)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('perfis de colaborador')
+      })
   }, [collaboratorProfiles, isPersistenceReady, persistenceMode])
 
   useEffect(() => {
@@ -7916,9 +7782,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('collaborators', collaborators).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('collaborators', collaborators)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('colaboradores')
+      })
   }, [collaborators, isPersistenceReady, persistenceMode])
 
   useEffect(() => {
@@ -7935,9 +7803,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('schedules', schedules).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('schedules', schedules)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('horarios')
+      })
   }, [isPersistenceReady, persistenceMode, schedules])
 
   useEffect(() => {
@@ -7954,9 +7824,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('scaleAssignments', scaleAssignments).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('scaleAssignments', scaleAssignments)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('escala')
+      })
   }, [isPersistenceReady, persistenceMode, scaleAssignments])
 
   useEffect(() => {
@@ -7973,9 +7845,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('scaleComments', scaleComments).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('scaleComments', scaleComments)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('comentarios da escala')
+      })
   }, [isPersistenceReady, persistenceMode, scaleComments])
 
   useEffect(() => {
@@ -7992,9 +7866,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('scaleExtraRoster', scaleExtraRoster).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('scaleExtraRoster', scaleExtraRoster)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('extras da escala')
+      })
   }, [isPersistenceReady, persistenceMode, scaleExtraRoster])
 
   useEffect(() => {
@@ -8011,9 +7887,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('users', users).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('users', users)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('usuarios')
+      })
   }, [isPersistenceReady, persistenceMode, users])
 
   useEffect(() => {
@@ -8030,9 +7908,11 @@ function App() {
       return
     }
 
-    void persistModuleCollection('auditLogs', auditLogs).catch(() => {
-      setPersistenceMode('local')
-    })
+    void persistModuleCollection('auditLogs', auditLogs)
+      .then(() => clearPersistenceFeedback())
+      .catch(() => {
+        handlePersistenceFailure('auditoria')
+      })
   }, [auditLogs, isPersistenceReady, persistenceMode])
 
   useEffect(() => {
@@ -8625,6 +8505,13 @@ function App() {
             ) : null}
           </div>
         </section>
+
+        {persistenceFeedback ? (
+          <div className={`feedback ${persistenceFeedback.type === 'error' ? 'error' : 'warning'}`}>
+            <strong>Falha de sincronizacao online</strong>
+            <span>{persistenceFeedback.message}</span>
+          </div>
+        ) : null}
 
         {activeSection === 'PainelMaster' && isSystemAdmin && currentCompany && (
           <>
@@ -10654,7 +10541,7 @@ function App() {
                                       return (
                                         <Fragment key={`coverage-${row.collaborator.id}`}>
                                           <div className="coverage-sticky coverage-person-card">
-                                            <strong>{getShortDisplayName(row.profile?.fullName ?? row.collaborator.cpf)}</strong>
+                                            <strong>{getShortDisplayName(getCollaboratorDisplayName(row.collaborator))}</strong>
                                             <span>{row.collaborator.primaryFunction} • {row.collaborator.employmentType}</span>
                                             <small>{row.sector || 'Setor nao definido'}</small>
                                             {rowValidation.issues.length > 0 ? <small>{rowValidation.issues[0]}</small> : null}
@@ -10890,9 +10777,8 @@ function App() {
                                                         return false
                                                       }
 
-                                                      const profile = getCollaboratorProfile(item.cpf)
                                                       const candidateText = [
-                                                        profile?.fullName ?? '',
+                                                        getCollaboratorDisplayName(item),
                                                         item.cpf,
                                                         item.primaryFunction,
                                                         getCollaboratorSector(item),
@@ -10904,10 +10790,9 @@ function App() {
                                                     })
                                                   : []
                                               const extraCandidateOptions = filteredExtraCandidates.map((item) => {
-                                                const profile = getCollaboratorProfile(item.cpf)
                                                 return {
                                                   id: item.id,
-                                                  label: `${profile?.fullName ?? item.cpf} • ${item.cpf}`,
+                                                  label: `${getCollaboratorDisplayName(item)}${item.cpf ? ` • ${item.cpf}` : ''}`,
                                                   helper: item.primaryFunction,
                                                 }
                                               })
@@ -10961,7 +10846,6 @@ function App() {
                                                   </tr>
 
                                                   {statusRows.map((collaborator) => {
-                                                    const profile = getCollaboratorProfile(collaborator.cpf)
                                                     const rowAssignments = getWeeklyRowAssignments(collaborator, weekDates)
                                                     const rowValidation = validateScaleRow(collaborator, weekDates)
                                                     const extraPayValue = parseCurrencyValue(
@@ -10989,9 +10873,7 @@ function App() {
                                                           <div className="scale-person-card">
                                                             <div className="scale-person-header">
                                                               <strong className="scale-print-name">
-                                                                {getShortDisplayName(
-                                                                  profile?.fullName ?? collaborator.cpf
-                                                                )}
+                                                                {getShortDisplayName(getCollaboratorDisplayName(collaborator))}
                                                               </strong>
                                                               <div className="scale-person-actions no-print">
                                                                 {canEditScale ? (
