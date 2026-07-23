@@ -306,6 +306,13 @@ type ScaleBatchModalState = {
   overwriteExisting: boolean
 }
 
+type ScaleExtraPickerModalState = {
+  weekStart: string
+  sector: string
+  functionName: string
+  search: string
+}
+
 type ScaleBatchRuntimeState = {
   weekDates: Date[]
   targetRows: CollaboratorRecord[]
@@ -1685,6 +1692,7 @@ function App() {
   const [extraSearchByWeek, setExtraSearchByWeek] = useState<Record<string, string>>({})
   const [scaleWarning, setScaleWarning] = useState<{ title: string; messages: string[] } | null>(null)
   const [scaleBatchModal, setScaleBatchModal] = useState<ScaleBatchModalState | null>(null)
+  const [scaleExtraPickerModal, setScaleExtraPickerModal] = useState<ScaleExtraPickerModalState | null>(null)
   const [scaleBatchWarning, setScaleBatchWarning] = useState<{
     title: string
     messages: string[]
@@ -2781,6 +2789,65 @@ function App() {
     return visibleScaleSectorOptions.length === 0 || visibleScaleSectorOptions.includes(sectorName)
   })
   const visibleScaleExtras = visibleScaleCollaborators.filter((item) => item.employmentType === 'EXTRA')
+  const scaleExtraPickerCandidates =
+    scaleExtraPickerModal === null
+      ? []
+      : visibleScaleExtras.filter((item) => {
+          if (scaleExtraPickerModal.sector && getCollaboratorSector(item) !== scaleExtraPickerModal.sector) {
+            return false
+          }
+
+          if (scaleExtraPickerModal.functionName && item.primaryFunction !== scaleExtraPickerModal.functionName) {
+            return false
+          }
+
+          const alreadyAdded = companyScaleExtraRoster.some(
+            (entry) => entry.weekStart === scaleExtraPickerModal.weekStart && entry.collaboratorId === item.id,
+          )
+          if (alreadyAdded) {
+            return false
+          }
+
+          const weekDates = getWeekDates(scaleExtraPickerModal.weekStart)
+          if (!weekDates.some((date) => isCollaboratorActiveOnDate(item, toIsoDate(date)))) {
+            return false
+          }
+
+          const search = scaleExtraPickerModal.search.trim().toLowerCase()
+          if (!search) {
+            return true
+          }
+
+          const candidateText = [
+            getCollaboratorDisplayName(item),
+            item.cpf,
+            item.primaryFunction,
+            getCollaboratorSector(item),
+            item.employmentType,
+          ]
+            .join(' ')
+            .toLowerCase()
+
+          return candidateText.includes(search)
+        })
+  const scaleExtraPickerSectorOptions = Array.from(
+    new Set(visibleScaleExtras.map((item) => getCollaboratorSector(item)).filter(Boolean)),
+  ).sort((left, right) => left.localeCompare(right))
+  const scaleExtraPickerFunctionOptions =
+    scaleExtraPickerModal === null
+      ? []
+      : Array.from(
+          new Set(
+            visibleScaleExtras
+              .filter((item) =>
+                scaleExtraPickerModal.sector
+                  ? getCollaboratorSector(item) === scaleExtraPickerModal.sector
+                  : true,
+              )
+              .map((item) => item.primaryFunction)
+              .filter(Boolean),
+          ),
+        ).sort((left, right) => left.localeCompare(right))
   const scaleCoverageDayDate = new Date(scaleCoverageDate + 'T12:00:00')
   const scaleCoverageDayKey = getCoverageDayKey(scaleCoverageDayDate)
   const scaleCoveragePublicServiceSettings = currentCompany
@@ -5050,6 +5117,10 @@ function App() {
     setScaleBatchModal(null)
   }
 
+  function closeScaleExtraPickerModal() {
+    setScaleExtraPickerModal(null)
+  }
+
   function closeScaleBatchWarning() {
     pendingScaleBatchRef.current = null
     setScaleBatchWarning(null)
@@ -5077,6 +5148,27 @@ function App() {
       scheduleIdValue: '',
       selectedDates: weekDates.map((date) => toIsoDate(date)),
       overwriteExisting: false,
+    })
+  }
+
+  function openScaleExtraPickerModal(weekDates: Date[]) {
+    if (weekDates.length !== 7 || weekDates.some((date) => Number.isNaN(date.getTime()))) {
+      setScaleWarning({
+        title: 'Semana indisponivel',
+        messages: ['Nao foi possivel abrir a selecao de EXTRA para esta semana. Recarregue a pagina e tente novamente.'],
+      })
+      return
+    }
+
+    const defaultSector = scaleExtraPickerSectorOptions[0] ?? ''
+    const defaultFunctionName =
+      visibleScaleExtras.find((item) => getCollaboratorSector(item) === defaultSector)?.primaryFunction ?? ''
+
+    setScaleExtraPickerModal({
+      weekStart: toIsoDate(weekDates[0]),
+      sector: defaultSector,
+      functionName: defaultFunctionName,
+      search: '',
     })
   }
 
@@ -10669,6 +10761,15 @@ function App() {
                               <button
                                 type="button"
                                 className="secondary-button"
+                                onClick={() => openScaleExtraPickerModal(weekDates)}
+                              >
+                                Adicionar EXTRA
+                              </button>
+                            ) : null}
+                            {canEditScale ? (
+                              <button
+                                type="button"
+                                className="secondary-button"
                                 onClick={() => openScaleBatchModal(weekDates)}
                               >
                                 Operacao em lote
@@ -12232,6 +12333,126 @@ function App() {
               <button type="button" className="primary-button" onClick={confirmScaleReplicationWarning}>
                 {scaleReplicationWarning.confirmLabel}
               </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {scaleExtraPickerModal && (
+        <div className="modal-backdrop" role="presentation" onClick={closeScaleExtraPickerModal}>
+          <section
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="scale-extra-picker-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="section-header modal-header">
+              <div>
+                <p className="eyebrow">Escala</p>
+                <h2 id="scale-extra-picker-title">Adicionar EXTRA na semana</h2>
+              </div>
+              <button type="button" className="ghost-button" onClick={closeScaleExtraPickerModal}>
+                Fechar
+              </button>
+            </div>
+
+            <p className="section-note">
+              Escolha setor, funcao e colaborador para incluir um EXTRA mesmo que essa linha ainda nao exista na grade.
+            </p>
+
+            <div className="form-grid">
+              <label>
+                Setor <span className="required-marker">*</span>
+                <select
+                  value={scaleExtraPickerModal.sector}
+                  onChange={(event) => {
+                    const nextSector = event.target.value
+                    const nextFunctionName =
+                      visibleScaleExtras.find((item) => getCollaboratorSector(item) === nextSector)?.primaryFunction ?? ''
+                    setScaleExtraPickerModal((current) =>
+                      current === null
+                        ? current
+                        : {
+                            ...current,
+                            sector: nextSector,
+                            functionName: nextFunctionName,
+                          },
+                    )
+                  }}
+                >
+                  {scaleExtraPickerSectorOptions.map((sectorName) => (
+                    <option key={sectorName} value={sectorName}>
+                      {sectorName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Funcao <span className="required-marker">*</span>
+                <select
+                  value={scaleExtraPickerModal.functionName}
+                  onChange={(event) =>
+                    setScaleExtraPickerModal((current) =>
+                      current === null
+                        ? current
+                        : {
+                            ...current,
+                            functionName: event.target.value,
+                          },
+                    )
+                  }
+                >
+                  {scaleExtraPickerFunctionOptions.map((functionName) => (
+                    <option key={functionName} value={functionName}>
+                      {functionName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field-span">
+                Buscar colaborador EXTRA
+                <input
+                  value={scaleExtraPickerModal.search}
+                  onChange={(event) =>
+                    setScaleExtraPickerModal((current) =>
+                      current === null
+                        ? current
+                        : {
+                            ...current,
+                            search: event.target.value,
+                          },
+                    )
+                  }
+                  placeholder="Buscar por nome, CPF, funcao ou setor"
+                />
+              </label>
+            </div>
+
+            <div className="scale-extra-picker-list">
+              {scaleExtraPickerCandidates.length > 0 ? (
+                scaleExtraPickerCandidates.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="scale-suggestion-item"
+                    onClick={() => {
+                      addExtraToWeek(scaleExtraPickerModal.weekStart, item.id)
+                      closeScaleExtraPickerModal()
+                    }}
+                  >
+                    <strong>{getCollaboratorDisplayName(item)}</strong>
+                    <span>
+                      {item.primaryFunction} • {getCollaboratorSector(item)} {item.cpf ? `• ${item.cpf}` : '• sem CPF'}
+                    </span>
+                  </button>
+                ))
+              ) : (
+                <div className="feedback">
+                  <strong>Nenhum EXTRA disponivel para este recorte.</strong>
+                  <p>Revise setor, funcao ou busca. O colaborador tambem precisa estar ativo em pelo menos um dia da semana.</p>
+                </div>
+              )}
             </div>
           </section>
         </div>
